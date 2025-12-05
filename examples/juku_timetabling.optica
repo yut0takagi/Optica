@@ -1,0 +1,40 @@
+# 塾のコマ割り最適化モデル
+# Optica v0.1 サンプル
+
+model "Takagi Juku Timetabling"
+
+# 集合の定義
+set STUDENTS = {"S1", "S2", "S3"}
+set TEACHERS = {"T1", "T2"}
+set SLOTS    = 1..5
+
+# パラメータの定義
+param pref[STUDENTS, TEACHERS, SLOTS] real
+param can_teach[TEACHERS, STUDENTS] in {0,1}
+
+# 変数の定義
+var x[STUDENTS, TEACHERS, SLOTS] binary
+
+# 目的関数：選好度の最大化
+maximize total_pref:
+    sum(s in STUDENTS, t in TEACHERS, k in SLOTS)
+        pref[s,t,k] * x[s,t,k]
+
+# 制約条件
+subject to:
+
+    # 各生徒は各スロットで最大1人の先生に割り当て
+    each_student_one_per_slot:
+        forall s in STUDENTS, k in SLOTS:
+            sum(t in TEACHERS) x[s,t,k] <= 1
+
+    # 各先生は各スロットで最大1人の生徒に割り当て
+    each_teacher_one_per_slot:
+        forall t in TEACHERS, k in SLOTS:
+            sum(s in STUDENTS) x[s,t,k] <= 1
+
+    # 担当可能な組み合わせのみ許可
+    teachable_only:
+        forall s in STUDENTS, t in TEACHERS, k in SLOTS:
+            x[s,t,k] <= can_teach[t,s]
+
