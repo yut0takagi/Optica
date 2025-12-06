@@ -1,0 +1,61 @@
+# =============================================================================
+# 10. 制約プログラミング (CP) - ジョブショップスケジューリング
+# =============================================================================
+# 複数のジョブを複数のマシンで処理する最適スケジュール
+#
+# 特徴: グローバル制約、disjunctive、no_overlap
+
+model "job_shop_scheduling"
+problem cp
+
+# 集合
+set JOBS = {"J1", "J2", "J3", "J4", "J5"}
+set MACHINES = {"M1", "M2", "M3"}
+set OPERATIONS = JOBS * MACHINES  # ジョブ×マシンの操作
+
+# パラメータ
+param duration[JOBS, MACHINES] int    # 処理時間
+param precedence[JOBS, MACHINES] int  # マシン順序（1が最初）
+param horizon int                     # スケジューリング水平線
+
+# 変数
+var start[JOBS, MACHINES] int >= 0 <= horizon   # 開始時刻
+var end[JOBS, MACHINES] int >= 0 <= horizon     # 終了時刻
+var makespan int >= 0 <= horizon                # 全体の完了時刻
+
+# 目的関数: メイクスパン最小化
+minimize total_makespan:
+    makespan
+
+subject to:
+    # 終了時刻の定義
+    end_time:
+        forall j in JOBS, m in MACHINES:
+            end[j, m] == start[j, m] + duration[j, m]
+    
+    # メイクスパンの定義
+    makespan_def:
+        forall j in JOBS, m in MACHINES:
+            makespan >= end[j, m]
+    
+    # ジョブ内の操作順序（precedence制約）
+    job_precedence:
+        forall j in JOBS, m1 in MACHINES, m2 in MACHINES 
+            where precedence[j, m1] < precedence[j, m2]:
+                end[j, m1] <= start[j, m2]
+    
+    # 各マシンでは同時に1つのジョブのみ（disjunctive制約）
+    machine_disjunctive:
+        forall m in MACHINES:
+            disjunctive(start[j, m], duration[j, m] for j in JOBS)
+    
+    # または no_overlap で表現
+    machine_no_overlap:
+        forall m in MACHINES:
+            no_overlap(start[j, m], end[j, m] for j in JOBS)
+    
+    # 累積リソース制約（マシンキャパシティ=1）
+    cumulative_resource:
+        forall m in MACHINES:
+            cumulative(start[j, m], duration[j, m], 1, 1) for j in JOBS
+

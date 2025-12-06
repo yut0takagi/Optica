@@ -1,210 +1,123 @@
-# Optica: A Domain-Specific Language for Constraint & Scheduling Optimization
+# Optica
 
-Optica（オプティカ）は、**スケジューリング・勤務表・コマ割り・資源配分などの数理最適化問題を直感的に記述するためのDSL（Domain Specific Language）**です。
-本言語は、教育現場・業務効率化・研究用途において、非エンジニアでも最適化モデルを読み書きできることを目的としています。
+**Ultra-fast Optimization DSL**
 
-Opticaで記述されたモデルは、内部で **Python（Pyomo / OR-Tools）に変換され、最適化ソルバー（CBC / GLPK / Gurobi 等）によって解かれます**。
+純粋Rust実装。デフォルトは依存最小・ヒューリスティック。  
+CP-SAT (OR-Tools) はオプション機能（`--features cp-sat`）で有効化。
 
----
+## インストール / ビルド
 
-# 1. 特徴
+- ローカルビルド（デフォルト機能=ヒューリスティックのみ）
 
-* 数理最適化（特にMILP）をシンプルに書ける独自言語
-* 制約記述に特化した直感的な構文
-* 集合、変数、目的関数、制約を簡潔に定義
-* Pythonエンジンが裏側で自動的に最適解を算出
-* CreateAppAutomateやAIエージェントによる自動生成と相性が良い
-* 拡張子は **`.optica`**
-
----
-
-# 2. Optica の基本構文
-
-Optica のファイルは、以下の4つの主要ブロックで構成されます。
-
-1. **set**（集合）
-2. **param**（パラメータ）
-3. **var**（変数）
-4. **objective / constraints**（目的関数・制約）
-
-以下に v0.1 仕様の文法をまとめます。
-
----
-
-# 3. 言語仕様（v0.1）
-
-## 3.1 コメント
-
-```
-# 行頭の # 以降はコメント
+```bash
+cargo build --release
 ```
 
-## 3.2 集合
+- インストール（デフォルト機能のみ）
 
-```
-set STUDENTS = {"S1", "S2", "S3"}
-set TEACHERS = {"T1", "T2"}
-set SLOTS    = 1..5
+```bash
+cargo install --path .
 ```
 
-* `{}`：集合の列挙
-* `a..b`：整数範囲
+- CP-SATを有効化する場合（環境にOR-ToolsのC++依存が必要）
 
-## 3.3 パラメータ
+```bash
+# OR-Toolsを用意（例: Homebrew）
+brew install or-tools
 
-```
-param can_teach[TEACHERS, STUDENTS] in {0,1}
-param pref[STUDENTS, TEACHERS, SLOTS] real
-```
-
-* `in {0,1}`：離散値の指定
-* `real / int`：型の指定
-
-## 3.4 変数
-
-```
-var x[STUDENTS, TEACHERS, SLOTS] binary
+# ビルド時にfeatureを有効化
+cargo build --release --features cp-sat
 ```
 
-* `binary`：0/1変数
-* `int` / `real`：整数・実数変数
+> CP-SATの依存が整っていない環境で `--features cp-sat` を付けるとビルドが失敗します。デフォルト機能のみであれば純Rustでビルド可能です。
 
-## 3.5 目的関数
+```bash
+# Rust必須
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-```
-maximize total_pref:
-    sum(s in STUDENTS, t in TEACHERS, k in SLOTS)
-        pref[s,t,k] * x[s,t,k]
-```
+# ヒューリスティックのみ（デフォルト）
+cargo build --release
 
-* `maximize` / `minimize` のどちらかを選択
-* `sum()` による線形式の表記
-
-## 3.6 制約
-
-```
-subject to:
-
-    each_student_one_per_slot:
-        forall s in STUDENTS, k in SLOTS:
-            sum(t in TEACHERS) x[s,t,k] <= 1
-
-    each_teacher_one_per_slot:
-        forall t in TEACHERS, k in SLOTS:
-            sum(s in STUDENTS) x[s,t,k] <= 1
-
-    teachable_only:
-        forall s in STUDENTS, t in TEACHERS, k in SLOTS:
-            x[s,t,k] <= can_teach[t,s]
+# CP-SATを有効化（OR-ToolsのC++依存が揃っている場合のみ）
+cargo build --release --features cp-sat
 ```
 
-* `forall` によるインデックス指定
-* 制約名は任意
+## 使い方
 
----
+```bash
+# モデルを解く
+optica model.optica
 
-# 4. サンプルモデル：塾のコマ割り最適化
+# オプション
+optica model.optica -m de -i 2000 -t 8
 
-以下は Optica を用いた、教育現場向けの典型的な最適化モデルです。
+# ベンチマーク
+optica bench 100
 
-```
-model "Takagi Juku Timetabling"
+# REPL
+optica repl
 
-set STUDENTS = {"S1", "S2", "S3"}
-set TEACHERS = {"T1", "T2"}
-set SLOTS    = 1..5
-
-param pref[STUDENTS, TEACHERS, SLOTS] real
-param can_teach[TEACHERS, STUDENTS] in {0,1}
-
-var x[STUDENTS, TEACHERS, SLOTS] binary
-
-maximize total_pref:
-    sum(s in STUDENTS, t in TEACHERS, k in SLOTS)
-        pref[s,t,k] * x[s,t,k]
-
-subject to:
-
-    each_student_one_per_slot:
-        forall s in STUDENTS, k in SLOTS:
-            sum(t in TEACHERS) x[s,t,k] <= 1
-
-    each_teacher_one_per_slot:
-        forall t in TEACHERS, k in SLOTS:
-            sum(s in STUDENTS) x[s,t,k] <= 1
-
-    teachable_only:
-        forall s in STUDENTS, t in TEACHERS, k in SLOTS:
-            x[s,t,k] <= can_teach[t,s]
+# サイドカーJSONでパラメータを渡す（model.optica と同じ階層に model.json を置く）
+optica model.optica
 ```
 
----
+## 言語仕様
 
-# 5. 実行方法（v0.1 想定）
+```optica
+# ナップサック問題
+set Items = {1, 2, 3, 4, 5};
 
-Optica は CLI から次のように使用する予定です。
+param value[Items] = {1: 10, 2: 40, 3: 30, 4: 50, 5: 35};
+param weight[Items] = {1: 5, 2: 4, 3: 6, 4: 3, 5: 2};
 
-```
-optica solve model.optica --data data.json
-```
+var x[Items] >= 0 <= 1;
 
-1. `.optica` ファイルをパースし AST に変換
-2. AST → Pyomo モデルに自動変換
-3. CBC または Gurobi で最適化実行
-4. 最適解を JSON または表形式で出力
-
----
-
-# 6. プロジェクト構成案
-
-```
-optica/
-  ├── parser/          # 字句解析・構文解析
-  ├── ast/             # 抽象構文木
-  ├── compiler/        # Pyomo/OR-Tools への変換
-  ├── runtime/         # データ管理・型チェック
-  ├── cli.py           # optica コマンド
-  └── examples/        # サンプルモデル
+maximize profit: sum{i in Items} value[i] * x[i];
+subject to capacity: sum{i in Items} weight[i] * x[i] <= 10;
 ```
 
----
+## パフォーマンス（最新ベンチ、DE基準）
 
-# 7. 今後のロードマップ
+| 次元 | シングル(DE) | 並列(DE,10T) | 高速化 |
+|------|--------------|--------------|--------|
+| 100  | 14.6ms | **5.0ms** | 2.9x |
+| 500  | 38.1ms | **14.7ms** | 2.6x |
+| 1000 | 75.5ms | **28.6ms** | 2.6x |
 
-### v0.2
+## ソルバー
 
-* data ブロックの実装（Optica 内で値を記述可能に）
-* VSCode 拡張のシンタックスハイライト
-* sum/forall のネスト安全化
+| メソッド | 特徴 |
+|----------|------|
+| `de` | 差分進化（デフォルト、並列対応） |
+| `pso` | 粒子群最適化 |
+| `hybrid` | DE + PSO ハイブリッド |
 
-### v0.3
+## プロジェクト構成
 
-* ソルバー選択機能
-* Solution Viewer（結果の可視化）
-* CreateAppAutomate からの自動生成機能
+```
+src/
+├── main.rs          # CLI
+├── cli.rs           # 引数解析
+├── parser.rs        # パーサー・式評価・MOO/CP記録・JSONロード
+├── config.rs        # 定数
+└── solver/
+    ├── mod.rs       # ソルバー（DE/PSO/Hybrid、CPサポート入口）
+    ├── rng.rs       # 乱数生成
+    ├── objective.rs # 目的関数（デフォルトsphere）
+    └── cpsat.rs     # CP-SAT連携（feature: cp-sat 時のみ）
+```
 
-### v1.0
+## 特徴 / 制約
 
-* Optica → WASM 実行エンジン
-* Web IDE
-* モデル共有プラットフォーム
+- **依存最小**: デフォルトは純Rustヒューリスティック。CP-SATはオプション。
+- **CP-SAT**: `--features cp-sat` 時は OR-Tools の C++ 依存が必須（例: `brew install or-tools`）。依存が無い環境ではビルドエラーになります。
+- **サイドカーJSON**: `model.optica` と同名の `model.json` を自動ロードしてパラメータ補完。
+- **多目的**: 重み付き和 / epsilon をヒューリスティックで評価。
+- **CPグローバル**: `disjunctive` / `no_overlap` / `cumulative` はペナルティ評価。厳密解は `--features cp-sat` + OR-Tools 環境で。
+- **式パーサは簡易版**: 複雑な非線形/入れ子は0評価になる可能性。
+- **JSONのみ対応**: 外部データ読み込みはJSONのサイドカーでのみサポート。
+- **警告**: `sphere` 未使用などの警告が出る場合がありますが動作に影響はありません。
 
----
+## ライセンス
 
-# 8. ライセンス
-
-MIT License（予定）
-
----
-
-# 9. 作者
-
-**Takagi Yuto** — Optica 言語設計者
-
-数理最適化・教育・AI 自動生成を融合した "未来のスケジューリング言語" を目指します。
-
----
-
-# 10. コントリビュート
-
-開発は随時進行中です。Issue・PR歓迎します。
+MIT

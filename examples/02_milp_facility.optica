@@ -1,0 +1,45 @@
+# =============================================================================
+# 2. 混合整数計画法 (MILP) - 施設配置問題
+# =============================================================================
+# どの施設を開設し、どの顧客をどの施設から供給するかを決定
+#
+# 特徴: 二値変数、連続変数、Big-M制約
+
+model "facility_location"
+problem milp
+
+# 集合
+set FACILITIES = {"F1", "F2", "F3"}
+set CUSTOMERS = {"C1", "C2", "C3", "C4", "C5"}
+
+# パラメータ
+param fixed_cost[FACILITIES] real       # 施設開設コスト
+param transport_cost[FACILITIES, CUSTOMERS] real  # 輸送コスト
+param demand[CUSTOMERS] real            # 顧客需要
+param capacity[FACILITIES] real         # 施設容量
+
+# 変数
+var y[FACILITIES] binary                # 施設開設 (0/1)
+var x[FACILITIES, CUSTOMERS] real >= 0  # 供給量
+
+# 目的関数: 総コスト最小化
+minimize total_cost:
+    sum(f in FACILITIES) fixed_cost[f] * y[f] +
+    sum(f in FACILITIES, c in CUSTOMERS) transport_cost[f, c] * x[f, c]
+
+subject to:
+    # 需要充足
+    meet_demand:
+        forall c in CUSTOMERS:
+            sum(f in FACILITIES) x[f, c] == demand[c]
+    
+    # 容量制約 (施設が開いている場合のみ供給可能)
+    capacity_if_open:
+        forall f in FACILITIES:
+            sum(c in CUSTOMERS) x[f, c] <= capacity[f] * y[f]
+    
+    # 論理制約: 供給するなら施設は開いている
+    linking:
+        forall f in FACILITIES, c in CUSTOMERS:
+            x[f, c] <= demand[c] * y[f]
+

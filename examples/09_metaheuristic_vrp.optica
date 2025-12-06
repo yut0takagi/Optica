@@ -1,0 +1,74 @@
+# =============================================================================
+# 9. メタヒューリスティクス - 配送計画問題 (VRP)
+# =============================================================================
+# 複数の車両で顧客を訪問する最短ルートを求める
+#
+# 特徴: 遺伝的アルゴリズム、近傍定義、初期解
+
+model "vehicle_routing"
+problem metaheuristic
+
+# アルゴリズム設定
+algorithm genetic:
+    population: 100
+    generations: 500
+    crossover_rate: 0.8
+    mutation_rate: 0.1
+    selection: "tournament"
+    elite_size: 5
+
+# 集合
+set CUSTOMERS = 1..20             # 顧客
+set VEHICLES = 1..5               # 車両
+set DEPOT = {0}                   # デポ
+set NODES = DEPOT + CUSTOMERS     # 全ノード
+
+# パラメータ
+param demand[CUSTOMERS] int       # 顧客需要
+param capacity[VEHICLES] int      # 車両容量
+param distance[NODES, NODES] real # 距離行列
+param service_time[CUSTOMERS] real # サービス時間
+
+# 変数（解の表現）
+var route[VEHICLES] permutation of CUSTOMERS  # 各車両のルート
+var assignment[CUSTOMERS] in VEHICLES         # 顧客の車両割当
+
+# 目的関数
+minimize total_distance:
+    sum(v in VEHICLES) route_distance(route[v])
+
+# 近傍定義
+neighborhood swap:
+    # 同一車両内の2顧客を交換
+    swap(route[v], i, j) for v in VEHICLES, i, j in route[v] where i < j
+
+neighborhood relocate:
+    # 顧客を別の車両に移動
+    move(c, v1, v2) for c in CUSTOMERS, v1, v2 in VEHICLES where v1 != v2
+
+neighborhood two_opt:
+    # 2-opt改善
+    two_opt(route[v], i, j) for v in VEHICLES, i, j in route[v] where i < j
+
+neighborhood cross:
+    # 車両間のルート交換
+    cross(route[v1], route[v2], i, j) for v1, v2 in VEHICLES where v1 < v2
+
+# 制約
+subject to:
+    # 容量制約
+    capacity_limit:
+        forall v in VEHICLES:
+            sum(c in route[v]) demand[c] <= capacity[v]
+    
+    # 全顧客訪問
+    visit_all:
+        forall c in CUSTOMERS:
+            exists v in VEHICLES: c in route[v]
+
+# 初期解の生成方法
+initial:
+    method: "nearest_neighbor"
+    # または具体的な初期解
+    # assignment[c] = (c - 1) mod card(VEHICLES) + 1 for c in CUSTOMERS
+

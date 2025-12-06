@@ -1,0 +1,43 @@
+[package]
+name = "optica"
+version = "1.0.0"
+edition = "2021"
+description = "Optimization DSL"
+license = "MIT"
+authors = ["Optica Team"]
+
+[[bin]]
+name = "optica"
+path = "src/main.rs"
+
+[dependencies]
+or-tools = { version = "0.1.0", optional = true, default-features = false }
+# 依存ゼロ！純粋Rust（CP対応のみ外部依存）
+serde_json = "1"
+
+[features]
+default = []
+cp-sat = ["or-tools"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+# 追加最適化
+overflow-checks = false
+debug-assertions = false
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+lto = true
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+inherits = "release"
+debug = true

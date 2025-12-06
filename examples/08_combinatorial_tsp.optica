@@ -1,0 +1,46 @@
+# =============================================================================
+# 8. 組合せ最適化 - 巡回セールスマン問題 (TSP)
+# =============================================================================
+# 全ての都市を1回ずつ訪問し、出発点に戻る最短経路を求める
+#
+# 特徴: 順列、サブツアー除去制約
+
+model "traveling_salesman"
+problem milp
+
+# 集合
+set CITIES = {"Tokyo", "Osaka", "Nagoya", "Fukuoka", "Sapporo"}
+set ARCS = CITIES * CITIES  # 全ペア
+
+# パラメータ
+param distance[CITIES, CITIES] real  # 都市間距離
+param n = card(CITIES)               # 都市数
+
+# 変数
+var x[CITIES, CITIES] binary         # 移動するかどうか
+var u[CITIES] int >= 1 <= n          # MTZ制約用の順序変数
+
+# 目的関数: 総移動距離最小化
+minimize total_distance:
+    sum(i in CITIES, j in CITIES where i != j) distance[i, j] * x[i, j]
+
+subject to:
+    # 各都市から1回出発
+    leave_once:
+        forall i in CITIES:
+            sum(j in CITIES where j != i) x[i, j] == 1
+    
+    # 各都市に1回到着
+    arrive_once:
+        forall j in CITIES:
+            sum(i in CITIES where i != j) x[i, j] == 1
+    
+    # MTZサブツアー除去制約
+    subtour_elimination:
+        forall i in CITIES, j in CITIES where i != j and i != "Tokyo" and j != "Tokyo":
+            u[i] - u[j] + n * x[i, j] <= n - 1
+    
+    # 開始都市の順序を固定
+    start_order:
+        u["Tokyo"] == 1
+

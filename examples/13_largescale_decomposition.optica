@@ -1,0 +1,112 @@
+# =============================================================================
+# 13. 大規模最適化 - Benders分解法
+# =============================================================================
+# 大規模な2段階確率計画問題を分解法で解く
+#
+# 特徴: マスター問題・サブ問題分離、並列計算、列生成
+
+model "large_scale_stochastic"
+problem milp
+
+# 分解法の指定
+decompose benders:
+    master: location_decisions
+    subproblems: scenario_operations
+    cuts: "optimality"  # または "feasibility" または "both"
+    max_iterations: 100
+    tolerance: 1e-4
+
+# 並列実行設定
+parallel:
+    workers: 8
+    strategy: "scenario_parallel"
+
+# 集合
+set FACILITIES = 1..100           # 施設候補（大規模）
+set CUSTOMERS = 1..1000           # 顧客（大規模）
+set SCENARIOS = 1..50             # シナリオ数
+
+# シナリオ確率
+param prob[SCENARIOS] real
+
+# パラメータ
+param fixed_cost[FACILITIES] real
+param capacity[FACILITIES] real
+param demand[CUSTOMERS, SCENARIOS] real  # シナリオ依存需要
+param transport_cost[FACILITIES, CUSTOMERS] real
+param shortage_penalty real
+
+# =============================================================================
+# マスター問題（施設配置決定）
+# =============================================================================
+master location_decisions:
+    # 第1段階変数
+    var y[FACILITIES] binary      # 施設開設
+    var theta[SCENARIOS] real     # サブ問題の目的関数値近似
+    
+    # 第1段階目的関数
+    minimize first_stage_cost:
+        sum(f in FACILITIES) fixed_cost[f] * y[f] +
+        sum(s in SCENARIOS) prob[s] * theta[s]
+    
+    # 論理制約
+    subject to:
+        # 最低施設数
+        min_facilities:
+            sum(f in FACILITIES) y[f] >= 5
+        
+        # 予算制約
+        budget:
+            sum(f in FACILITIES) fixed_cost[f] * y[f] <= total_budget
+        
+        # Benders cuts（アルゴリズムが自動追加）
+        # benders_cuts: ...
+
+# =============================================================================
+# サブ問題（シナリオごとの運用）
+# =============================================================================
+subproblem scenario_operations[s in SCENARIOS]:
+    # 第2段階変数
+    var x[FACILITIES, CUSTOMERS] real >= 0  # 供給量
+    var shortage[CUSTOMERS] real >= 0       # 欠品量
+    
+    # 第2段階目的関数
+    minimize second_stage_cost:
+        sum(f in FACILITIES, c in CUSTOMERS) transport_cost[f, c] * x[f, c] +
+        shortage_penalty * sum(c in CUSTOMERS) shortage[c]
+    
+    subject to:
+        # 容量制約（マスターの y を使用）
+        capacity_limit:
+            forall f in FACILITIES:
+                sum(c in CUSTOMERS) x[f, c] <= capacity[f] * y[f]  # linking
+        
+        # 需要充足
+        meet_demand:
+            forall c in CUSTOMERS:
+                sum(f in FACILITIES) x[f, c] + shortage[c] >= demand[c, s]
+
+# =============================================================================
+# 列生成（オプション）
+# =============================================================================
+# column_generation:
+#     pricing_problem: find_new_route
+#     master_problem: route_selection
+#     reduced_cost_threshold: -1e-6
+
+# =============================================================================
+# 切除平面（オプション）
+# =============================================================================
+cuts:
+    # Gomory cuts
+    gomory: true
+    
+    # Mixed integer rounding
+    mir: true
+    
+    # カスタムカット
+    # user_cut cover_cut:
+    #     if sum(f in S) y[f] >= card(S) - 1 
+    #     then sum(f in S) y[f] <= card(S) - 1
+    #     for S in violated_covers(current_solution)
+

@@ -1,0 +1,39 @@
+# =============================================================================
+# 1. 線形計画法 (LP) - 生産計画問題
+# =============================================================================
+# 製品の生産量を決定し、利益を最大化する
+# 
+# 特徴: 連続変数、線形制約、線形目的関数
+
+model "production_planning"
+problem lp
+
+# 集合
+set PRODUCTS = {"A", "B", "C"}
+set RESOURCES = {"labor", "machine", "material"}
+
+# パラメータ
+param profit[PRODUCTS] real      # 製品あたり利益
+param usage[PRODUCTS, RESOURCES] real  # 資源使用量
+param capacity[RESOURCES] real   # 資源容量
+param demand[PRODUCTS] real      # 最大需要
+
+# 変数（連続）
+var x[PRODUCTS] real >= 0        # 生産量
+
+# 目的関数: 利益最大化
+maximize total_profit:
+    sum(p in PRODUCTS) profit[p] * x[p]
+
+# 制約
+subject to:
+    # 資源制約
+    resource_limit:
+        forall r in RESOURCES:
+            sum(p in PRODUCTS) usage[p, r] * x[p] <= capacity[r]
+    
+    # 需要上限
+    demand_limit:
+        forall p in PRODUCTS:
+            x[p] <= demand[p]
+

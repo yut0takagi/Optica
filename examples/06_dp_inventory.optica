@@ -1,0 +1,49 @@
+# =============================================================================
+# 6. 動的計画法 (DP) - 在庫管理問題
+# =============================================================================
+# 各期の発注量を決定し、総コストを最小化
+#
+# 特徴: ステージ（時間）、状態（在庫）、ベルマン方程式
+
+model "inventory_management"
+problem dp
+
+# 時間軸
+stage t in 1..12                  # 12期間（月）
+
+# 状態空間
+state S[t] in 0..100 int          # 在庫レベル
+
+# 決定変数
+decision order[t] in 0..50 int    # 発注量
+
+# パラメータ
+param demand[1..12] int           # 各期の需要
+param order_cost real             # 発注固定費
+param hold_cost real              # 在庫保持コスト/単位
+param shortage_cost real          # 欠品コスト/単位
+param unit_cost real              # 単価
+
+# 状態遷移
+transition:
+    S[t+1] = S[t] + order[t] - demand[t]
+
+# コスト関数
+def stage_cost(s, o, d) = 
+    if o > 0 then order_cost else 0 + 
+    unit_cost * o +
+    hold_cost * max(0, s + o - d) +
+    shortage_cost * max(0, d - s - o)
+
+# ベルマン方程式
+bellman V[t, s]:
+    min(o in 0..50 where s + o >= demand[t] or shortage_cost < infinity)
+        stage_cost(s, o, demand[t]) + V[t+1, s + o - demand[t]]
+
+# 終端条件
+terminal V[13, s] = hold_cost * s
+
+# 初期状態
+initial:
+    S[1] = 10
+

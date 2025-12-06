@@ -1,0 +1,57 @@
+# =============================================================================
+# 7. 確率計画法 (Stochastic) - 農家の作付け問題
+# =============================================================================
+# 収穫量が不確実な状況での最適な作付面積を決定
+#
+# 特徴: シナリオ、確率、2段階意思決定、期待値最大化
+
+model "farmer_problem"
+problem stochastic
+
+# 集合
+set CROPS = {"wheat", "corn", "sugarbeet"}
+set SCENARIOS = {"below", "average", "above"}
+
+# 確率
+param prob[SCENARIOS] real        # シナリオ確率
+data:
+    prob["below"] = 0.25
+    prob["average"] = 0.50
+    prob["above"] = 0.25
+
+# パラメータ
+param total_land real             # 総耕作面積
+param plant_cost[CROPS] real      # 作付コスト/エーカー
+param sell_price[CROPS] real      # 販売価格
+param buy_price[CROPS] real       # 購入価格
+param min_requirement[CROPS] real # 最低必要量
+param yield_factor[CROPS, SCENARIOS] real  # 収穫係数
+
+# 第1段階変数（シナリオ実現前に決定）
+var x[CROPS] real >= 0            # 作付面積
+
+# 第2段階変数（シナリオごとに決定）
+recourse sell[CROPS, SCENARIOS] real >= 0   # 販売量
+recourse buy[CROPS, SCENARIOS] real >= 0    # 購入量
+
+# 目的関数: 期待利益最大化
+maximize expected_profit:
+    -sum(c in CROPS) plant_cost[c] * x[c] +
+    expectation(s in SCENARIOS, prob[s])
+        sum(c in CROPS) (sell_price[c] * sell[c, s] - buy_price[c] * buy[c, s])
+
+subject to:
+    # 土地制約（第1段階）
+    land_limit:
+        sum(c in CROPS) x[c] <= total_land
+    
+    # 需要充足（各シナリオで）
+    meet_requirement:
+        forall c in CROPS, s in SCENARIOS:
+            yield_factor[c, s] * x[c] + buy[c, s] - sell[c, s] >= min_requirement[c]
+    
+    # 販売上限（生産量 + 購入量 - 必要量）
+    sell_limit:
+        forall c in CROPS, s in SCENARIOS:
+            sell[c, s] <= yield_factor[c, s] * x[c] + buy[c, s] - min_requirement[c]
+
