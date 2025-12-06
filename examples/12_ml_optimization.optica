@@ -1,0 +1,78 @@
+# =============================================================================
+# 12. 最適化 × 機械学習 - 予測付き最適化
+# =============================================================================
+# 機械学習モデルの予測を制約・目的関数に組み込む
+#
+# 特徴: MLモデル埋め込み、勾配ベース最適化、ニューラルネット制約
+
+model "ml_integrated_optimization"
+problem nlp
+
+# 機械学習モデルのインポート
+import "sklearn_model" as demand_predictor
+import "pytorch_model" as quality_model
+
+# 集合
+set PRODUCTS = {"P1", "P2", "P3"}
+set FEATURES = {"price", "promotion", "season", "competitor_price"}
+set TIME = 1..12
+
+# パラメータ（MLモデルの入力特徴量）
+param historical_demand[PRODUCTS, TIME] real
+param price_elasticity[PRODUCTS] real
+param base_demand[PRODUCTS] real
+
+# 決定変数
+var price[PRODUCTS] real >= 0.5 <= 2.0    # 価格（正規化）
+var promotion[PRODUCTS] binary            # プロモーション実施
+var production[PRODUCTS] real >= 0        # 生産量
+
+# MLモデルを使った予測関数
+def predicted_demand(p) = 
+    demand_predictor.predict(
+        price[p], 
+        promotion[p], 
+        season_factor[current_period],
+        competitor_price[p]
+    )
+
+# 品質スコア予測（ニューラルネット）
+def quality_score(p) =
+    quality_model.forward(production[p], resource_allocation[p])
+
+# 目的関数: 利益最大化
+maximize total_profit:
+    sum(p in PRODUCTS) 
+        price[p] * predicted_demand(p) - 
+        unit_cost[p] * production[p] -
+        promotion_cost * promotion[p]
+
+subject to:
+    # 需要と生産のバランス
+    demand_production_balance:
+        forall p in PRODUCTS:
+            production[p] >= predicted_demand(p) * 0.95
+    
+    # 品質制約（MLモデル出力）
+    quality_threshold:
+        forall p in PRODUCTS:
+            quality_score(p) >= min_quality
+    
+    # 生産能力制約
+    capacity:
+        sum(p in PRODUCTS) production[p] <= total_capacity
+    
+    # 予算制約
+    budget:
+        sum(p in PRODUCTS) promotion[p] * promotion_cost <= promotion_budget
+
+# ソルバー設定（勾配ベース）
+algorithm gradient_based:
+    method: "adam"
+    learning_rate: 0.01
+    max_iterations: 1000
+    tolerance: 1e-6
+    
+    # MLモデルの微分計算
+    gradient_mode: "automatic"  # または "numerical"
+

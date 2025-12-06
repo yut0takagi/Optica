@@ -1,0 +1,94 @@
+# =============================================================================
+# 11. 多目的最適化 (MOO) - サプライチェーン設計
+# =============================================================================
+# コスト、リードタイム、環境負荷を同時に最適化
+#
+# 特徴: 複数目的関数、パレート最適、重み付け法
+
+model "supply_chain_design"
+problem moo
+
+# 集合
+set SUPPLIERS = {"S1", "S2", "S3"}
+set FACTORIES = {"F1", "F2"}
+set WAREHOUSES = {"W1", "W2", "W3"}
+set CUSTOMERS = {"C1", "C2", "C3", "C4"}
+
+# パラメータ
+param supply_cost[SUPPLIERS, FACTORIES] real
+param production_cost[FACTORIES] real
+param transport_cost[FACTORIES, WAREHOUSES] real
+param delivery_cost[WAREHOUSES, CUSTOMERS] real
+param lead_time[SUPPLIERS, FACTORIES] real
+param production_time[FACTORIES] real
+param transport_time[FACTORIES, WAREHOUSES] real
+param delivery_time[WAREHOUSES, CUSTOMERS] real
+param co2_supply[SUPPLIERS, FACTORIES] real
+param co2_transport[FACTORIES, WAREHOUSES] real
+param co2_delivery[WAREHOUSES, CUSTOMERS] real
+param demand[CUSTOMERS] real
+param capacity[FACTORIES] real
+
+# 変数
+var x[SUPPLIERS, FACTORIES] real >= 0          # 調達量
+var y[FACTORIES, WAREHOUSES] real >= 0         # 生産・輸送量
+var z[WAREHOUSES, CUSTOMERS] real >= 0         # 配送量
+var factory_open[FACTORIES] binary             # 工場開設
+var warehouse_open[WAREHOUSES] binary          # 倉庫開設
+
+# 複数目的関数
+objectives:
+    # 目的1: 総コスト最小化
+    minimize total_cost:
+        sum(s in SUPPLIERS, f in FACTORIES) supply_cost[s, f] * x[s, f] +
+        sum(f in FACTORIES) production_cost[f] * sum(w in WAREHOUSES) y[f, w] +
+        sum(f in FACTORIES, w in WAREHOUSES) transport_cost[f, w] * y[f, w] +
+        sum(w in WAREHOUSES, c in CUSTOMERS) delivery_cost[w, c] * z[w, c]
+    
+    # 目的2: リードタイム最小化
+    minimize max_lead_time:
+        max(c in CUSTOMERS)
+            min(s in SUPPLIERS, f in FACTORIES, w in WAREHOUSES)
+                lead_time[s, f] + production_time[f] + 
+                transport_time[f, w] + delivery_time[w, c]
+    
+    # 目的3: CO2排出量最小化
+    minimize total_co2:
+        sum(s in SUPPLIERS, f in FACTORIES) co2_supply[s, f] * x[s, f] +
+        sum(f in FACTORIES, w in WAREHOUSES) co2_transport[f, w] * y[f, w] +
+        sum(w in WAREHOUSES, c in CUSTOMERS) co2_delivery[w, c] * z[w, c]
+
+# パレート最適解を求める方法
+pareto method: "epsilon_constraint"
+    primary: total_cost
+    epsilon:
+        max_lead_time <= 10
+        total_co2 <= 5000
+
+# または重み付け法
+# pareto method: "weighted_sum"
+#     weight total_cost: 0.5
+#     weight max_lead_time: 0.3
+#     weight total_co2: 0.2
+
+subject to:
+    # フロー保存（工場）
+    factory_flow:
+        forall f in FACTORIES:
+            sum(s in SUPPLIERS) x[s, f] == sum(w in WAREHOUSES) y[f, w]
+    
+    # フロー保存（倉庫）
+    warehouse_flow:
+        forall w in WAREHOUSES:
+            sum(f in FACTORIES) y[f, w] == sum(c in CUSTOMERS) z[w, c]
+    
+    # 需要充足
+    meet_demand:
+        forall c in CUSTOMERS:
+            sum(w in WAREHOUSES) z[w, c] == demand[c]
+    
+    # 容量制約
+    capacity_limit:
+        forall f in FACTORIES:
+            sum(w in WAREHOUSES) y[f, w] <= capacity[f] * factory_open[f]
+

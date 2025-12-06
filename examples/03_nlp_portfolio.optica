@@ -1,0 +1,39 @@
+# =============================================================================
+# 3. 非線形最適化 (NLP) - ポートフォリオ最適化
+# =============================================================================
+# リスクを最小化しながら目標リターンを達成する投資配分
+#
+# 特徴: 二次項（分散）、非線形目的関数
+
+model "portfolio_optimization"
+problem nlp
+
+# 集合
+set ASSETS = {"stock_A", "stock_B", "stock_C", "bond", "cash"}
+
+# パラメータ
+param expected_return[ASSETS] real      # 期待リターン
+param covariance[ASSETS, ASSETS] real   # 共分散行列
+param min_return real                   # 目標最小リターン
+
+# 変数
+var w[ASSETS] real >= 0                 # 投資比率
+
+# 目的関数: リスク（分散）最小化
+minimize portfolio_variance:
+    sum(i in ASSETS, j in ASSETS) covariance[i, j] * w[i] * w[j]
+
+subject to:
+    # 投資比率の合計は1
+    budget:
+        sum(a in ASSETS) w[a] == 1
+    
+    # 目標リターン以上
+    return_target:
+        sum(a in ASSETS) expected_return[a] * w[a] >= min_return
+    
+    # 分散投資制約（単一資産に集中しない）
+    diversification:
+        forall a in ASSETS:
+            w[a] <= 0.4
+

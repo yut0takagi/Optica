@@ -1,0 +1,19 @@
+# シンプルなナップサック問題
+# データをモデル内に埋め込んだバージョン
+
+model "Simple Knapsack"
+
+set ITEMS = {"A", "B", "C", "D"}
+
+# 変数のみ定義（パラメータは外部データで提供）
+var x[ITEMS] binary
+
+# 目的関数: 選択アイテムの数を最大化（テスト用）
+maximize count:
+    sum(i in ITEMS) x[i]
+
+# 制約: 最大2つまで選択
+subject to:
+    limit:
+        sum(i in ITEMS) x[i] <= 2
+
