@@ -1,0 +1,34 @@
+# =============================================================================
+# 4. 凸最適化 (Convex) - サポートベクターマシン
+# =============================================================================
+# 二値分類のためのマージン最大化
+#
+# 特徴: 凸二次計画、ヒンジ損失
+
+model "svm_classifier"
+problem convex
+
+# 集合
+set SAMPLES = 1..100       # 訓練サンプル
+set FEATURES = 1..10       # 特徴量
+
+# パラメータ
+param X[SAMPLES, FEATURES] real  # 特徴量行列
+param y[SAMPLES] real            # ラベル (-1 or +1)
+param C real                     # 正則化パラメータ
+
+# 変数
+var w[FEATURES] real             # 重みベクトル
+var b real                       # バイアス
+var xi[SAMPLES] real >= 0        # スラック変数
+
+# 目的関数: マージン最大化 + スラック変数ペナルティ
+minimize svm_objective:
+    0.5 * sum(f in FEATURES) w[f] * w[f] + C * sum(i in SAMPLES) xi[i]
+
+subject to:
+    # 分類制約（ソフトマージン）
+    classification:
+        forall i in SAMPLES:
+            y[i] * (sum(f in FEATURES) w[f] * X[i, f] + b) >= 1 - xi[i]
+

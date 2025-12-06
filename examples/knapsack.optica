@@ -1,0 +1,15 @@
+# Optica ナップサック問題
+# 容量制限内で価値を最大化
+
+set Items = {1, 2, 3, 4, 5};
+
+param value[Items] = {1: 10, 2: 40, 3: 30, 4: 50, 5: 35};
+param weight[Items] = {1: 5, 2: 4, 3: 6, 4: 3, 5: 2};
+param capacity = 10;
+
+var x[Items] >= 0 <= 1;
+
+maximize profit: sum{i in Items} value[i] * x[i];
+
+subject to weight_limit: sum{i in Items} weight[i] * x[i] <= capacity;
+

@@ -1,0 +1,40 @@
+# =============================================================================
+# 5. 二次計画法 (QP) - リッジ回帰
+# =============================================================================
+# L2正則化付き最小二乗法
+#
+# 特徴: 凸二次目的関数、線形制約（または制約なし）
+
+model "ridge_regression"
+problem qp
+
+# 集合
+set SAMPLES = 1..50        # サンプル数
+set FEATURES = 1..5        # 特徴量数
+
+# パラメータ
+param X[SAMPLES, FEATURES] real  # 特徴量行列
+param y_true[SAMPLES] real       # 目標値
+param lambda real                # 正則化係数
+
+# 変数
+var beta[FEATURES] real          # 回帰係数
+var y_pred[SAMPLES] real         # 予測値
+var residual[SAMPLES] real       # 残差
+
+# 目的関数: 残差二乗和 + L2正則化
+minimize total_loss:
+    sum(i in SAMPLES) residual[i] * residual[i] + 
+    lambda * sum(f in FEATURES) beta[f] * beta[f]
+
+subject to:
+    # 予測値の定義
+    prediction:
+        forall i in SAMPLES:
+            y_pred[i] == sum(f in FEATURES) X[i, f] * beta[f]
+    
+    # 残差の定義
+    residual_def:
+        forall i in SAMPLES:
+            residual[i] == y_true[i] - y_pred[i]
+
