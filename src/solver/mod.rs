@@ -36,8 +36,6 @@ pub use rng::Rng;
 const PENALTY_COEFF: f64 = 1e6;
 static PENALTY_ENV: OnceLock<f64> = OnceLock::new();
 
-pub mod cpsat;
-
 // =============================================================================
 // 差分進化（DE）
 // =============================================================================
@@ -77,7 +75,9 @@ fn de_single(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
     let mut rnd_cr = vec![0.0; dim];
 
     // メインループ
+    let mut stall = 0usize;
     for iter in 0..max_iter {
+        let mut improved = false;
         for i in 0..POP_SIZE {
             // 親選択
             let (r1, r2) = pop.select_parents(&mut rng, i);
@@ -94,15 +94,20 @@ fn de_single(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
             if trial_fit <= pop.fit[i] {
                 pop.update(i, &trial, trial_fit);
 
-                if trial_fit < best_fit {
+                if trial_fit < best_fit - TOLERANCE {
                     best_fit = trial_fit;
                     best.copy_from_slice(&trial);
-
-                    if best_fit < TOLERANCE {
-                        return (best, best_fit, iter + 1);
-                    }
+                    improved = true;
                 }
             }
+        }
+        if improved {
+            stall = 0;
+        } else {
+            stall += 1;
+        }
+        if stall >= STALL_ITERS {
+            return (best, best_fit, iter + 1);
         }
     }
 
@@ -132,7 +137,9 @@ fn de_parallel(model: &Model, max_iter: usize, threads: usize) -> (Vec<f64>, f64
                 let mut trial = vec![0.0; dim];
                 let mut rnd_cr = vec![0.0; dim];
 
+                let mut stall = 0usize;
                 for _iter in 0..max_iter {
+                    let mut improved = false;
                     for i in 0..sub_pop {
                         let (r1, r2) = pop.select_parents(&mut rng, i);
                         let j_rand = rng.usize(dim);
@@ -145,14 +152,20 @@ fn de_parallel(model: &Model, max_iter: usize, threads: usize) -> (Vec<f64>, f64
                         let trial_fit = compute_fitness(&model, &trial);
                         if trial_fit <= pop.fit[i] {
                             pop.update(i, &trial, trial_fit);
-                            if trial_fit < best_fit {
+                            if trial_fit < best_fit - TOLERANCE {
                                 best_fit = trial_fit;
                                 best.copy_from_slice(&trial);
-                                if best_fit < TOLERANCE {
-                                    return (best, best_fit);
-                                }
+                                improved = true;
                             }
                         }
+                    }
+                    if improved {
+                        stall = 0;
+                    } else {
+                        stall += 1;
+                    }
+                    if stall >= STALL_ITERS {
+                        return (best, best_fit);
                     }
                 }
 
@@ -243,7 +256,9 @@ pub fn pso(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
     let mut r2_buf = vec![0.0; dim];
 
     // メインループ
+    let mut stall = 0usize;
     for iter in 0..max_iter {
+        let mut improved = false;
         for i in 0..N_PARTICLES {
             let offset = i * dim;
 
@@ -265,15 +280,21 @@ pub fn pso(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
                 swarm.pbest_fit[i] = fit;
 
                 // gbest更新
-                if fit < gbest_fit {
+                if fit < gbest_fit - TOLERANCE {
                     gbest_fit = fit;
                     gbest.copy_from_slice(&swarm.pos[offset..offset + dim]);
-
-                    if gbest_fit < TOLERANCE {
-                        return (gbest, gbest_fit, iter + 1);
-                    }
+                    improved = true;
                 }
             }
+        }
+
+        if improved {
+            stall = 0;
+        } else {
+            stall += 1;
+        }
+        if stall >= STALL_ITERS {
+            return (gbest, gbest_fit, iter + 1);
         }
 
         w = (w * PSO_W_DECAY).max(PSO_W_MIN);

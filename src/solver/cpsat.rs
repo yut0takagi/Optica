@@ -211,7 +211,10 @@ fn linearize_rec(
             };
             if let Some(&i) = model.var_map.get(&key) {
                 if let Some(&v) = vars.get(i) {
-                    terms.push(((sign * scale) as i64, v));
+                    // 変数は既にスケール済み空間で生成されており、RHS 側で別途
+                    // スケーリングされるため、係数には符号のみを乗せる。
+                    // `* scale` を係数にも掛けると二重スケーリングになるバグを修正。
+                    terms.push((sign as i64, v));
                 }
             }
             // スカラー/添字付きパラメータは定数項扱いとなり、元実装同様サポート対象外。
