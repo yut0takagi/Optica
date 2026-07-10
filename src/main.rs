@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod expr;
 mod parser;
 mod solver;
 
