@@ -731,8 +731,8 @@ fn parse_state_or_decision(
         }
     }
 
-    // intキーワードの確認
-    let is_int = line.contains(" int") || line.contains(" Integer");
+    // intキーワードの確認（parse_bounds と同一のトークン単位判定を共有）
+    let is_int = is_integer_decl(line);
 
     let mut combos: Vec<String> = Vec::new();
     if let Some(idx_list) = indices {
@@ -902,17 +902,31 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     Ok(())
 }
 
+/// 宣言行が整数型（`int`/`Integer`/`integer`）を指定しているか。
+/// 部分文字列一致は誤検出（`point`/`interval`/`print` 等の変数名）を招くため、
+/// 空白区切りトークンとして厳密に判定する。
+fn is_integer_decl(line: &str) -> bool {
+    line.split_whitespace()
+        .any(|t| matches!(t, "int" | "Integer" | "integer"))
+}
+
+/// 宣言行が binary 型（`binary`/`Binary`）を指定しているか（トークン単位で判定）。
+fn is_binary_decl(line: &str) -> bool {
+    line.split_whitespace()
+        .any(|t| matches!(t, "binary" | "Binary"))
+}
+
 fn parse_bounds(line: &str) -> Result<(f64, f64, bool), String> {
     let mut lb = 0.0f64;
     let mut ub = 1000.0f64;
 
     // Binary変数（整数フラグも立てる）
-    if line.contains("binary") || line.contains("Binary") {
+    if is_binary_decl(line) {
         return Ok((0.0, 1.0, true));
     }
 
     // Integer変数（境界はそのまま）
-    let is_int = line.contains("int") || line.contains("Integer");
+    let is_int = is_integer_decl(line);
 
     // >= パターン
     if let Some(p) = line.find(">=") {
