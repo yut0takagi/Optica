@@ -25,10 +25,10 @@ pub fn solve_cp(
     let mut objective_terms = Vec::new();
     if !model.objectives.is_empty() {
         let obj = &model.objectives[0];
-        let lin = linearize_expr(model, obj.expr.as_str(), &vars, scale);
+        let lin = linearize_expr(model, &obj.ast, &vars, scale);
         objective_terms.extend(lin);
-    } else if let Some(expr) = &model.objective_expr {
-        let lin = linearize_expr(model, expr.as_str(), &vars, scale);
+    } else if let Some(ast) = &model.objective_ast {
+        let lin = linearize_expr(model, ast, &vars, scale);
         objective_terms.extend(lin);
     }
     if model.maximize {
@@ -44,13 +44,18 @@ pub fn solve_cp(
     solver.minimize(obj);
 
     // 線形制約
+    let empty_x = vec![0.0; model.dim];
+    let empty_env = std::collections::HashMap::new();
     for c in &model.constraints {
-        let lin = linearize_expr(model, c.expr.as_str(), &vars, scale);
+        let lin = linearize_expr(model, &c.lhs, &vars, scale);
         let lhs = lin
             .iter()
             .map(|(coef, var)| LinearExpr::from(*var) * *coef)
             .fold(LinearExpr::from(0), |acc, e| acc + e);
-        let rhs = (c.rhs * scale) as i64;
+        // RHS は Fase1 時点では定数式（数値リテラル/パラメータ参照）のみを想定。
+        // 変数を含む RHS は評価上 0 として扱われる（`eval_sym` のガード経由）。
+        let rhs_val = crate::expr::eval(&c.rhs, &empty_x, &empty_env, &model.ctx());
+        let rhs = (rhs_val * scale) as i64;
         match c.op {
             ConstraintOp::Le => {
                 solver.add_linear_constraint(lhs <= rhs);
@@ -163,23 +168,55 @@ pub fn solve_cp(
     Ok((best, fitness, 0))
 }
 
-// 線形化（非常に限定的：x[i], 定数、単純な足し算のみを想定）
-fn linearize_expr(model: &Model, expr: &str, vars: &[IntVar], scale: f64) -> Vec<(i64, IntVar)> {
+// 線形化（非常に限定的：x[i]、単純な足し算・引き算のみを想定。
+// Task 2 で式表現が文字列から AST (`crate::expr::Expr`) に置き換わったため、
+// 旧「'+' でトークン分割」ロジックを AST 走査へ移植した。定数項（純粋な数値・
+// パラメータ項）は元実装でも安全に係数化できていなかったため、変数項のみを
+// 線形項として収集する限定実装を維持する。
+fn linearize_expr(
+    model: &Model,
+    e: &crate::expr::Expr,
+    vars: &[IntVar],
+    scale: f64,
+) -> Vec<(i64, IntVar)> {
     let mut terms: Vec<(i64, IntVar)> = Vec::new();
-    for token in expr.split('+') {
-        let t = token.trim();
-        if let Some(idx) = model.var_map.get(t) {
-            terms.push((1, vars[*idx]));
-        } else if let Some(v) = model.params.get(t).and_then(|m| m.get("_")) {
-            let c = (v * scale) as i64;
-            let const_var = vars.get(0).cloned().unwrap_or_else(|| {
-                // もし変数がない場合のダミー
-                // ここでは0~0の定数を返す
-                // ただし通常dim>0の前提
-                unimplemented!()
-            });
-            terms.push((c, const_var)); // const_var * c（後で符号反転含む）
-        }
-    }
+    linearize_rec(model, e, vars, scale, 1.0, &mut terms);
     terms
+}
+
+fn linearize_rec(
+    model: &Model,
+    e: &crate::expr::Expr,
+    vars: &[IntVar],
+    scale: f64,
+    sign: f64,
+    terms: &mut Vec<(i64, IntVar)>,
+) {
+    use crate::expr::{Expr, Op};
+    match e {
+        Expr::Bin(Op::Add, a, b) => {
+            linearize_rec(model, a, vars, scale, sign, terms);
+            linearize_rec(model, b, vars, scale, sign, terms);
+        }
+        Expr::Bin(Op::Sub, a, b) => {
+            linearize_rec(model, a, vars, scale, sign, terms);
+            linearize_rec(model, b, vars, scale, -sign, terms);
+        }
+        Expr::Neg(a) => linearize_rec(model, a, vars, scale, -sign, terms),
+        Expr::Sym { name, idx } => {
+            let key = if idx.is_empty() {
+                name.clone()
+            } else {
+                format!("{}[{}]", name, idx.join(","))
+            };
+            if let Some(&i) = model.var_map.get(&key) {
+                if let Some(&v) = vars.get(i) {
+                    terms.push(((sign * scale) as i64, v));
+                }
+            }
+            // スカラー/添字付きパラメータは定数項扱いとなり、元実装同様サポート対象外。
+        }
+        // min/max/sum/if 等の非線形・非対応式は無視する（元実装と同様の限定実装）。
+        _ => {}
+    }
 }

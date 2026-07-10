@@ -332,8 +332,12 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
                 let mut total = 0.0;
                 for (name, w) in weights {
                     if let Some(obj) = model.objectives.iter().find(|o| &o.name == name) {
-                        let mut v =
-                            model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                        let mut v = crate::expr::eval(
+                            &obj.ast,
+                            x,
+                            &std::collections::HashMap::new(),
+                            &model.ctx(),
+                        );
                         if obj.maximize {
                             v = -v;
                         }
@@ -347,8 +351,12 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
                 // epsilon制約: primaryを最適化、他は閾値超過にペナルティ
                 let mut v_primary = 0.0;
                 if let Some(obj) = model.objectives.iter().find(|o| &o.name == primary) {
-                    v_primary =
-                        model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                    v_primary = crate::expr::eval(
+                        &obj.ast,
+                        x,
+                        &std::collections::HashMap::new(),
+                        &model.ctx(),
+                    );
                     if obj.maximize {
                         v_primary = -v_primary;
                     }
@@ -356,8 +364,12 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
                 let mut vio_eps = 0.0;
                 for (name, op, rhs) in eps {
                     if let Some(obj) = model.objectives.iter().find(|o| &o.name == name) {
-                        let mut v =
-                            model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                        let mut v = crate::expr::eval(
+                            &obj.ast,
+                            x,
+                            &std::collections::HashMap::new(),
+                            &model.ctx(),
+                        );
                         if obj.maximize {
                             v = -v;
                         }
@@ -375,7 +387,8 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
             _ => {
                 // デフォルト: 先頭の目的を使用
                 let obj = &model.objectives[0];
-                let mut v = model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                let mut v =
+                    crate::expr::eval(&obj.ast, x, &std::collections::HashMap::new(), &model.ctx());
                 if obj.maximize {
                     v = -v;
                 }

@@ -1,13 +1,6 @@
 //! AST ベースの式評価器（Pratt パーサ）。
 //! 文字列を1度だけ Expr にコンパイルし、以後は再帰評価する。
 
-// NOTE(deviation from plan): このクレートは `[lib]` ターゲットを持たない bin-only
-// クレートのため、`pub` を付けても外部公開APIとして到達可能扱いにはならない。
-// Fase1 時点ではこのモジュールは Model へ未配線（意図的にstandalone、Task 2で配線予定）
-// のため、`cargo clippy --all-targets -D warnings` がモジュール全体を dead_code として
-// 検出してしまう。Task 2 で配線されるまでの一時的な抑制。
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -341,6 +334,18 @@ impl P {
                     "pow" => Func::Pow,
                     _ => unreachable!(),
                 };
+                let expected_arity = match f {
+                    Func::Min | Func::Max | Func::Pow => 2,
+                    Func::Abs | Func::Sqrt | Func::Exp | Func::Log => 1,
+                };
+                if args.len() != expected_arity {
+                    return Err(format!(
+                        "{} expects {} argument(s), got {}",
+                        id,
+                        expected_arity,
+                        args.len()
+                    ));
+                }
                 Ok(Expr::Func(f, args))
             }
             _ => {
@@ -440,6 +445,42 @@ pub fn compile(src: &str) -> Result<Expr, String> {
     Ok(e)
 }
 
+/// Expr 内の（スコープ外＝loop 変数でない）シンボル基底名を収集する。
+pub fn collect_free_syms(e: &Expr, scope: &mut Vec<String>, out: &mut Vec<String>) {
+    match e {
+        Expr::Num(_) => {}
+        Expr::Sym { name, .. } => {
+            if !scope.iter().any(|s| s == name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::Neg(a) => collect_free_syms(a, scope, out),
+        Expr::Bin(_, a, b) => {
+            collect_free_syms(a, scope, out);
+            collect_free_syms(b, scope, out);
+        }
+        Expr::Func(_, args) => {
+            for a in args {
+                collect_free_syms(a, scope, out);
+            }
+        }
+        Expr::Sum(iters, body) => {
+            let n = scope.len();
+            for (v, _) in iters {
+                scope.push(v.clone());
+            }
+            collect_free_syms(body, scope, out);
+            scope.truncate(n);
+        }
+        Expr::If(c, a, b) => {
+            collect_free_syms(&c.lhs, scope, out);
+            collect_free_syms(&c.rhs, scope, out);
+            collect_free_syms(a, scope, out);
+            collect_free_syms(b, scope, out);
+        }
+    }
+}
+
 // ---- Evaluator ----
 pub fn eval(e: &Expr, x: &[f64], env: &HashMap<String, String>, ctx: &Ctx) -> f64 {
     match e {
@@ -460,7 +501,14 @@ pub fn eval(e: &Expr, x: &[f64], env: &HashMap<String, String>, ctx: &Ctx) -> f6
                         av / bv
                     }
                 }
-                Op::Pow => av.powf(bv),
+                Op::Pow => {
+                    let r = av.powf(bv);
+                    if r.is_finite() {
+                        r
+                    } else {
+                        0.0
+                    }
+                }
             }
         }
         Expr::Func(f, args) => eval_func(*f, args, x, env, ctx),
@@ -511,7 +559,14 @@ fn eval_func(f: Func, args: &[Expr], x: &[f64], env: &HashMap<String, String>, c
                 v.ln()
             }
         }
-        Func::Pow if args.len() == 2 => a(0).powf(a(1)),
+        Func::Pow if args.len() == 2 => {
+            let r = a(0).powf(a(1));
+            if r.is_finite() {
+                r
+            } else {
+                0.0
+            }
+        }
         _ => 0.0,
     }
 }
@@ -530,7 +585,7 @@ fn eval_sym(
             }
         }
         if let Some(i) = ctx.var_map.get(name) {
-            return x[*i];
+            return x.get(*i).copied().unwrap_or(0.0);
         }
         if let Some(sv) = env.get(name) {
             if let Ok(v) = sv.parse::<f64>() {
@@ -546,7 +601,7 @@ fn eval_sym(
     let k = key.join(",");
     let vk = format!("{}[{}]", name, k);
     if let Some(i) = ctx.var_map.get(&vk) {
-        return x[*i];
+        return x.get(*i).copied().unwrap_or(0.0);
     }
     if let Some(m) = ctx.params.get(name) {
         if let Some(v) = m.get(&k) {
@@ -646,6 +701,12 @@ mod tests {
     #[test]
     fn unknown_function_errors() {
         assert!(compile("frobnicate(1)").is_err());
+    }
+
+    #[test]
+    fn wrong_arity_is_compile_error() {
+        assert!(compile("sqrt(1,2)").is_err());
+        assert!(compile("min(1)").is_err());
     }
 
     #[test]
