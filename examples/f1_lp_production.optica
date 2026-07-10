@@ -1,0 +1,7 @@
+set PROD = {A, B};
+param profit[PROD] = {A: 3, B: 5};
+param usage[PROD] = {A: 1, B: 2};
+param cap = 10;
+var x[PROD] >= 0 <= 100;
+maximize total: sum{p in PROD} profit[p] * x[p];
+subject to res: sum{p in PROD} usage[p] * x[p] <= cap;

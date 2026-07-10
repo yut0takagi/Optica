@@ -1,0 +1,2 @@
+var y >= 0 <= 5;
+minimize obj: (y - 2) ^ 2 + 1;
