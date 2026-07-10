@@ -325,8 +325,20 @@ pub fn parse(source: &str) -> Result<Model, String> {
         } else if line.starts_with("minimize") {
             model.maximize = false;
             parse_objective(line, &mut model)?;
-        } else if line.starts_with("subject to") {
+        } else if let Some(stripped) = line.strip_prefix("subject to") {
             in_subject_to = true;
+            // "subject to" の直後を見る。":"（または空）で始まる場合はブロック
+            // マーカー単体（"subject to:" / "subject to"）とみなし、従来通り
+            // 何もしない（後続のインデント行が個別の制約として下の
+            // `in_subject_to` 分岐で parse_constraint に渡る）。
+            // それ以外の非空文字列が続く場合は "subject to weight_limit:
+            // expr OP rhs;" 形式のインライン制約であり、従来はここで
+            // 握り潰されて制約が一切適用されないバグがあった。同じ
+            // parse_constraint（name: ラベルと forall を扱う）に渡して修正する。
+            let rest = stripped.trim();
+            if !rest.is_empty() && !rest.starts_with(':') {
+                parse_constraint(rest, &mut model)?;
+            }
         } else if in_subject_to && !line.is_empty() {
             parse_constraint(line, &mut model)?;
         }
