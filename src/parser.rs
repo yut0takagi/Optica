@@ -11,6 +11,7 @@ pub struct Model {
     pub dim: usize,
     pub lb: Vec<f64>,
     pub ub: Vec<f64>,
+    pub var_int: Vec<bool>,
     pub var_names: Vec<String>,
     pub var_map: HashMap<String, usize>, // 変数名 -> インデックス
     pub maximize: bool,
@@ -64,6 +65,7 @@ impl Model {
             dim: 0,
             lb: Vec::new(),
             ub: Vec::new(),
+            var_int: Vec::new(),
             var_names: Vec::new(),
             var_map: HashMap::new(),
             maximize: false,
@@ -369,6 +371,7 @@ pub fn parse(source: &str) -> Result<Model, String> {
     }
 
     model.dim = model.lb.len();
+    model.var_int.resize(model.dim, false);
     Ok(model)
 }
 
@@ -640,7 +643,7 @@ fn parse_var(
     };
 
     // 境界値の解析
-    let (lb, ub) = parse_bounds(line)?;
+    let (lb, ub, is_int) = parse_bounds(line)?;
 
     // インデックスの展開
     let mut combos: Vec<String> = Vec::new();
@@ -656,6 +659,7 @@ fn parse_var(
     for var_name in combos {
         model.lb.push(lb);
         model.ub.push(ub);
+        model.var_int.push(is_int);
         model.var_names.push(var_name);
     }
 
@@ -727,8 +731,8 @@ fn parse_state_or_decision(
         }
     }
 
-    // intキーワードの確認（将来の拡張用）
-    let _is_int = line.contains(" int") || line.contains(" Integer");
+    // intキーワードの確認
+    let is_int = line.contains(" int") || line.contains(" Integer");
 
     let mut combos: Vec<String> = Vec::new();
     if let Some(idx_list) = indices {
@@ -743,6 +747,7 @@ fn parse_state_or_decision(
     for var_name in combos {
         model.lb.push(lb);
         model.ub.push(ub);
+        model.var_int.push(is_int);
         model.var_names.push(var_name);
     }
 
@@ -897,13 +902,13 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_bounds(line: &str) -> Result<(f64, f64), String> {
+fn parse_bounds(line: &str) -> Result<(f64, f64, bool), String> {
     let mut lb = 0.0f64;
     let mut ub = 1000.0f64;
 
-    // Binary変数
+    // Binary変数（整数フラグも立てる）
     if line.contains("binary") || line.contains("Binary") {
-        return Ok((0.0, 1.0));
+        return Ok((0.0, 1.0, true));
     }
 
     // Integer変数（境界はそのまま）
@@ -932,7 +937,7 @@ fn parse_bounds(line: &str) -> Result<(f64, f64), String> {
         // デフォルトのまま
     }
 
-    Ok((lb, ub))
+    Ok((lb, ub, is_int))
 }
 
 #[cfg(test)]

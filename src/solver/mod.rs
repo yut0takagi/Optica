@@ -345,6 +345,20 @@ fn pso_update_velocity_position(
 // =============================================================================
 
 fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
+    // 整数（binary/int）フラグの立つ次元を丸めてから評価する（目的・制約の両方に適用）。
+    // `repaired` を if の外で宣言し、branch 内で代入・借用することで所有権とライフタイムを両立させる。
+    let mut repaired: Vec<f64>;
+    let x: &[f64] = if model.var_int.iter().any(|&b| b) {
+        repaired = x.to_vec();
+        for (j, &is_int) in model.var_int.iter().enumerate() {
+            if is_int {
+                repaired[j] = x[j].round().clamp(model.lb[j], model.ub[j]);
+            }
+        }
+        &repaired
+    } else {
+        x
+    };
     // 多目的対応
     if !model.objectives.is_empty() {
         match &model.pareto {
@@ -426,6 +440,17 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
     let (_feasible, violation) = model.check_constraints(x);
     let cp_penalty = compute_cp_penalty(model, x);
     obj + (violation + cp_penalty) * penalty_coeff()
+}
+
+/// 整数（binary/int）フラグの立つ次元を丸めた解ベクトルを返す（報告用）。
+pub fn round_integers(model: &Model, x: &[f64]) -> Vec<f64> {
+    let mut v = x.to_vec();
+    for (j, &is_int) in model.var_int.iter().enumerate() {
+        if is_int {
+            v[j] = x[j].round().clamp(model.lb[j], model.ub[j]);
+        }
+    }
+    v
 }
 
 fn penalty_coeff() -> f64 {
