@@ -372,10 +372,15 @@ pub fn parse(source: &str) -> Result<Model, String> {
     Ok(model)
 }
 
-/// `subject to`/`objectives:`/`data:` はブロック開始マーカーであり、
-/// 自身の後続行を吸収（連結）しない。
+/// `subject to`/`objectives:`/`data:`/`epsilon:` はブロック開始マーカーであり、
+/// 自身の後続行を吸収（連結）しない（各後続行は parse() が個別に解釈する）。
+/// 特に `epsilon:` は閾値行（`name <= v`）を後続インデント行に持つため、
+/// ここで除外しないと閾値が連結され `epsilon:` スキップに巻き込まれて落ちる。
 fn is_section_marker(line: &str) -> bool {
-    line.starts_with("subject to") || line.starts_with("objectives:") || line.starts_with("data:")
+    line.starts_with("subject to")
+        || line.starts_with("objectives:")
+        || line.starts_with("data:")
+        || line.starts_with("epsilon:")
 }
 
 /// この行から新しい論理文が始まる（＝直前の論理文への連結を止める）べきトップレベルキーワードか。
@@ -928,4 +933,45 @@ fn parse_bounds(line: &str) -> Result<(f64, f64), String> {
     }
 
     Ok((lb, ub))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回帰テスト: 論理行連結が `epsilon:` の閾値行（次のインデント行）を
+    /// 吸収して落とさないこと。吸収すると parse() の `epsilon:` スキップに
+    /// 巻き込まれ eps が空になる（Task 3 導入時のリグレッション）。
+    #[test]
+    fn epsilon_thresholds_are_captured() {
+        let src = [
+            "var x >= 0 <= 10",
+            "var y >= 0 <= 10",
+            "objectives:",
+            "    minimize cost:",
+            "        x",
+            "    minimize spread:",
+            "        y",
+            "pareto method: \"epsilon_constraint\"",
+            "    primary: cost",
+            "    epsilon:",
+            "        spread <= 1",
+            "subject to:",
+            "    c1: x >= 0",
+        ]
+        .join("\n");
+
+        let model = parse(&src).expect("parse");
+        match &model.pareto {
+            ParetoMethod::Epsilon { primary, eps } => {
+                assert_eq!(primary, "cost");
+                assert_eq!(eps.len(), 1, "epsilon thresholds dropped: {:?}", eps);
+                let (name, op, rhs) = &eps[0];
+                assert_eq!(name, "spread");
+                assert!(matches!(op, ConstraintOp::Le), "expected Le, got {:?}", op);
+                assert_eq!(*rhs, 1.0);
+            }
+            other => panic!("expected Epsilon pareto method, got {:?}", other),
+        }
+    }
 }
