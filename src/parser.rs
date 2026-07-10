@@ -30,6 +30,8 @@ pub struct Constraint {
     pub lhs: crate::expr::Expr,
     pub rhs: crate::expr::Expr,
     pub op: ConstraintOp,
+    /// forall で束縛された添字変数（例: {"i": "2"}）。forall を伴わない制約では空。
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,14 +103,13 @@ impl Model {
 
     /// 制約違反をチェック
     pub fn check_constraints(&self, x: &[f64]) -> (bool, f64) {
-        let env = HashMap::new();
         let ctx = self.ctx();
         let mut feasible = true;
         let mut total_violation = 0.0;
 
         for constraint in &self.constraints {
-            let l = crate::expr::eval(&constraint.lhs, x, &env, &ctx);
-            let r = crate::expr::eval(&constraint.rhs, x, &env, &ctx);
+            let l = crate::expr::eval(&constraint.lhs, x, &constraint.env, &ctx);
+            let r = crate::expr::eval(&constraint.rhs, x, &constraint.env, &ctx);
             let v = match constraint.op {
                 ConstraintOp::Le => (l - r).max(0.0),
                 ConstraintOp::Ge => (r - l).max(0.0),
@@ -135,8 +136,9 @@ pub fn parse(source: &str) -> Result<Model, String> {
     let mut primary_obj: Option<String> = None;
     let mut pareto_mode: Option<String> = None;
 
-    for line in source.lines() {
-        let line = line.trim();
+    let statements = logical_statements(source);
+    for stmt in &statements {
+        let line = stmt.trim();
 
         // 空行・コメントをスキップ
         if line.is_empty()
@@ -360,13 +362,73 @@ pub fn parse(source: &str) -> Result<Model, String> {
         check(&o.ast, &[])?;
     }
     for c in &model.constraints {
-        // Task 3 で forall 制約の env 変数をここに渡すよう更新する
-        check(&c.lhs, &[])?;
-        check(&c.rhs, &[])?;
+        // forall で束縛された添字変数名は既知スコープとして許可する
+        let fv: Vec<String> = c.env.keys().cloned().collect();
+        check(&c.lhs, &fv)?;
+        check(&c.rhs, &fv)?;
     }
 
     model.dim = model.lb.len();
     Ok(model)
+}
+
+/// `subject to`/`objectives:`/`data:` はブロック開始マーカーであり、
+/// 自身の後続行を吸収（連結）しない。
+fn is_section_marker(line: &str) -> bool {
+    line.starts_with("subject to") || line.starts_with("objectives:") || line.starts_with("data:")
+}
+
+/// この行から新しい論理文が始まる（＝直前の論理文への連結を止める）べきトップレベルキーワードか。
+fn is_top_level_start(line: &str) -> bool {
+    line.starts_with("var ")
+        || line.starts_with("param ")
+        || line.starts_with("set ")
+        || line.starts_with("maximize")
+        || line.starts_with("minimize")
+        || line.starts_with("pareto")
+        || is_section_marker(line)
+}
+
+/// ソースを「論理文」の列に再構成する。
+/// コメント・空行を除去した上で、`maximize:`/`minimize:`/制約ラベル/`forall ...:` のように
+/// 行末が単独の `:` で終わる行（＝本体が次行以降にある行。ただし `subject to:`/`objectives:`/
+/// `data:` は除く）は、次のトップレベルキーワード、またはインデントが自身以下に戻るまで、
+/// 後続行を空白連結して1つの論理文にする。
+fn logical_statements(source: &str) -> Vec<String> {
+    let mut raw: Vec<(usize, String)> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        raw.push((indent, trimmed.to_string()));
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let (base_indent, mut joined) = raw[i].clone();
+        i += 1;
+
+        // 行末が（`::` ではなく）単独の `:` で終わる本体待ち行は、後続行を吸収する。
+        let awaits_body =
+            joined.ends_with(':') && !joined.ends_with("::") && !is_section_marker(&joined);
+
+        if awaits_body {
+            while i < raw.len() {
+                let (indent, next_text) = raw[i].clone();
+                if indent <= base_indent || is_top_level_start(&next_text) {
+                    break;
+                }
+                joined.push(' ');
+                joined.push_str(&next_text);
+                i += 1;
+            }
+        }
+        out.push(joined);
+    }
+    out
 }
 
 fn expand_indices(idx_list: Vec<&str>, sets: &HashMap<String, Vec<String>>) -> Vec<Vec<String>> {
@@ -714,8 +776,29 @@ fn parse_objective_named(line: &str) -> Result<(String, crate::expr::Expr), Stri
     }
 }
 
+/// `i in S, j in T` 形式の forall ヘッダを `[("i","S"), ("j","T")]` にパースする。
+fn parse_forall_header(header: &str) -> Result<Vec<(String, String)>, String> {
+    let mut v = Vec::new();
+    for part in header.split(',') {
+        let part = part.trim();
+        if let Some(in_pos) = part.find(" in ") {
+            let var = part[..in_pos].trim().to_string();
+            let set = part[in_pos + 4..].trim().to_string();
+            if var.is_empty() || set.is_empty() {
+                return Err(format!("bad forall binding: {}", part));
+            }
+            v.push((var, set));
+        } else {
+            return Err(format!("bad forall binding: {}", part));
+        }
+    }
+    Ok(v)
+}
+
 fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     // weight_limit: sum{i in Items} weight[i] * x[i] <= capacity;
+    // forall i in S: x[i] <= 1
+    // cap: forall i in S: x[i] <= 1
     let line = line.trim_end_matches(';');
 
     // CPグローバル制約は記録のみ（簡易ペナルティ用）
@@ -724,10 +807,28 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
         return Ok(());
     }
 
-    let (name, expr_part) = if let Some(colon) = line.find(':') {
-        (line[..colon].trim().to_string(), &line[colon + 1..])
+    // 先頭のラベル（"name:"）があれば取り出す。ただし "forall ...:" 自体をラベルと誤認しない。
+    let (name, rest) = if let Some(colon) = line.find(':') {
+        let head = line[..colon].trim();
+        if !head.is_empty() && !head.starts_with("forall") {
+            (head.to_string(), line[colon + 1..].trim())
+        } else {
+            ("".to_string(), line)
+        }
     } else {
         ("".to_string(), line)
+    };
+
+    // forall プレフィックスを検出し、束縛変数と本体を分離する。
+    let (forall_bindings, expr_part) = if let Some(body) = rest.trim().strip_prefix("forall ") {
+        let colon = body
+            .find(':')
+            .ok_or_else(|| format!("forall missing ':' in constraint: {}", line))?;
+        let header = body[..colon].trim();
+        let tail = body[colon + 1..].trim().to_string();
+        (parse_forall_header(header)?, tail)
+    } else {
+        (Vec::new(), rest.trim().to_string())
     };
 
     let expr_part = expr_part.trim();
@@ -754,16 +855,39 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     let lhs_ast = crate::expr::compile(lhs)?;
     let rhs_ast = crate::expr::compile(rhs_str)?;
 
-    model.constraints.push(Constraint {
-        name: if name.is_empty() {
-            format!("c{}", model.constraints.len())
-        } else {
-            name
-        },
-        lhs: lhs_ast,
-        rhs: rhs_ast,
-        op,
-    });
+    let base_name = if name.is_empty() {
+        format!("c{}", model.constraints.len())
+    } else {
+        name
+    };
+
+    if forall_bindings.is_empty() {
+        model.constraints.push(Constraint {
+            name: base_name,
+            lhs: lhs_ast,
+            rhs: rhs_ast,
+            op,
+            env: HashMap::new(),
+        });
+    } else {
+        // forall の束縛集合をデカルト積へ展開し、組み合わせごとに Constraint を1本生成する。
+        let bound_vars: Vec<String> = forall_bindings.iter().map(|(v, _)| v.clone()).collect();
+        let set_refs: Vec<&str> = forall_bindings.iter().map(|(_, s)| s.as_str()).collect();
+        let value_lists = expand_indices(set_refs, &model.sets);
+        for combo in cartesian(&value_lists) {
+            let mut env = HashMap::new();
+            for (var, val) in bound_vars.iter().zip(combo.iter()) {
+                env.insert(var.clone(), val.clone());
+            }
+            model.constraints.push(Constraint {
+                name: base_name.clone(),
+                lhs: lhs_ast.clone(),
+                rhs: rhs_ast.clone(),
+                op,
+                env,
+            });
+        }
+    }
 
     Ok(())
 }
