@@ -53,6 +53,14 @@
    追跡中 `./optica`（sha `807e…`）と新規ビルド（sha `fed0…`）はハッシュが異なり、前者は誤動作する。
 6. **テストが存在しない**
    `#[test]` も `tests/` もゼロ。回帰を防げない。
+7. **example の大半は「実行可能なモデル」ではない（重要な発見）**
+   - ほぼ全例が `forall <i> in <SET>:`（制約の全称量化）を使うが現パーサ未対応。
+   - `param profit[PRODUCTS] real` のように**宣言のみでデータが無い**例が大半で、サイドカー JSON も
+     `juku_data.json` の1個だけ。→ 01/03/04/05/11/13 等は係数未定義（0評価）で**既知最適が存在しない**。
+   - `def f(p)=model.predict(...)` / `import "sklearn_model"`（12）や集約 `max(c in ...) min(...)`（11）は
+     実装不能・大規模。
+   - **自己完結して解けるのは `knapsack.optica` と `simple_knapsack.optica` の2つのみ**。
+   → よって「全例を golden 化」は非現実的。Fase1 は**コア修正＋厳選 golden 化**に方針決定（下記スコープ）。
 
 ## 2. ゴール（Fase1 の定義）
 
@@ -65,22 +73,27 @@ CI を「本当に意味のある緑」（テストあり）にする。stale �
   CP グローバル制約の厳密解（cp-sat）。
 - 真の MILP（分枝限定）。整数性は「丸め込み修復」で近似する。
 
-## 3. 例のフェーズ振り分け
+## 3. スコープ確定：コア修正＋厳選 golden 化
 
-新規バイナリでの全例実測（ほぼ全て obj≈0＝複数行取りこぼし）を踏まえ、複数行パース修正後に
-厳密検証可能となる見込みの例を Fase1、ソルバー拡張が要る例を Fase2 とする。
+「全例を golden 化」は §1.7 の理由で非現実的なため、Fase1 は以下に確定する。
 
-Fase1 対象（複数行パース＋関数＋整数性で厳密/検証可能を狙う）:
-`01_lp_production` `02_milp_facility(binary)` `03_nlp_portfolio(exp)` `04_convex_svm`
-`05_qp_regression` `11_moo_supply_chain(weighted/epsilon)` `12_ml_optimization(binary)`
-`knapsack` `simple_knapsack`（＋`advanced_features` はスモーク）
+### 3.1 golden 対象（既知最適で回帰テスト）
+- **既存の自己完結例**: `knapsack.optica`（連続 LP 緩和、profit 最大）、`simple_knapsack.optica`（binary、count 最大）。
+- **新規に作成する data 内蔵例**（Fase1 で追加。コア修正を厳密検証するため）:
+  - `examples/f1_lp_production.optica` … 小規模 LP（データ内蔵、`forall` 制約、連続変数）
+  - `examples/f1_knapsack_binary.optica` … 真の 0/1 ナップサック（value/weight/capacity 内蔵、binary、既知最適）
+  - `examples/f1_nlp_curve.optica` … `sqrt`/`^` 等の関数を使う小 NLP（内点最適が既知）
+  - いずれも既知最適値を解析的に算出し golden 値として固定する。
 
-Fase2 送り（experimental 明示）:
-`06_dp_inventory` `07_stochastic_farmer` `08_combinatorial_tsp` `09_metaheuristic_vrp`
-`10_cp_scheduling` `13_largescale_decomposition` `juku_timetabling`
+### 3.2 スモーク対象（parse 成功＋実行のみ確認）
+- `advanced_features.optica` など、`def`/`import` を含まず parse は通るべき例。
 
-> 実装計画で各 Fase1 例の tractability と golden 期待値を最終確認し、想定より難しい例は
-> 「実行可能＋上界」テストに格下げ、または Fase2 送りにする判断を明記する。
+### 3.3 experimental（対象外・明示）
+- データ欠落／`forall`だけでは解けない／`def`/`import`/集約演算子依存の既存例:
+  `01`〜`13` の該当分, `juku_timetabling`。README・各ヘッダに「experimental（未対応構文/データ未整備）」を明示。
+  `def`/`import` を含む例（`12` 等）は **明確なパースエラー**（未対応構文である旨）を返すことを許容する。
+
+> Fase2（別スペック）で DP/確率/CP/TSP/VRP と data 整備・forall 以外の高度構文に着手する。
 
 ## 4. アーキテクチャと変更点
 
@@ -89,7 +102,10 @@ Fase2 送り（experimental 明示）:
   キーワード（`var`/`param`/`set`/`maximize`/`minimize`/`subject to`/`objectives:`/`data:` 等）
   が現れるまで**継続行を連結**してから式としてコンパイルする。
 - ラベル行（`limit:` 等）＋次行に本体、というインデント構文も吸収する。
-- 受け入れ: 複数行スタイルの例で目的・制約が正しく取り込まれること（obj が 0 でなくなる）。
+- **`forall <i> in <SET>[, <j> in <SET2>...]:` の制約展開**を実装する。1つの書かれた制約を集合要素ごとに
+  1本ずつ展開し（ネスト forall はデカルト積）、各展開で `env` に添字を束縛して lhs/rhs 式を評価する。
+  → LP/MILP 等の制約側が機能するようになる（golden 対象例が要求）。
+- 受け入れ: 複数行スタイル＋forall の例で目的・制約が正しく取り込まれること（obj が 0 でなくなる）。
 
 ### 4.2 AST 式評価器（新規 `src/expr.rs`）
 文字列の毎回再解析を廃止し、**パース時に 1 度だけ AST 化 → 何度も評価**する。
@@ -156,10 +172,10 @@ source → 文パーサ（複数行連結） → Model{ vars(+var_int), params, 
 
 ## 7. 受け入れ基準（Definition of Done）
 1. `cargo build` / `cargo clippy --all-targets -- -D warnings` / `cargo test` が緑（テストあり）。
-2. Fase1 対象の全 example が golden 期待値 ± 許容誤差かつ実行可能を返す。
-3. 回帰テスト（複数行パース・早期収束・`min/abs/sqrt/exp/log/^`・整数性）が緑。
-4. 未知シンボル/関数/括弧不整合が明示エラー。
-5. 追跡バイナリ撤去、README/CHANGELOG 更新済み、Fase2 例が experimental 明示。
+2. §3.1 の golden 対象例（既存2＋新規3）が golden 期待値 ± 許容誤差かつ実行可能を返す。
+3. 回帰テスト（複数行パース・forall 展開・早期収束・`min/abs/sqrt/exp/log/^`・整数性）が緑。
+4. 未知シンボル/関数/括弧不整合が明示エラー（`def`/`import` 含む未対応構文も明示エラー）。
+5. 追跡バイナリ撤去、README/CHANGELOG 更新済み、experimental 例が明示済み。
 
 ## 8. リスクと制約
 - 丸め込み修復は真の MILP ではないため、`02_milp_facility` 等が大規模だと厳密最適に届かない可能性
