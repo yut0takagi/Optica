@@ -87,11 +87,11 @@ optica model.optica --allow-unsupported   # warning を出してスキップし�
 - `f1_nlp_curve.optica` — 非線形（`^` 使用）
 - `knapsack.optica` / `simple_knapsack.optica` — ナップサック
 
-**`[EXPERIMENTAL]`（未対応構文・データ未整備のため現状では正しい結果を返さない。各ファイル先頭に注記あり、Fase2 対象）:**
+**`examples/experimental/` の `[EXPERIMENTAL]`（未対応構文・データ未整備のため現状では正しい結果を返さない。既定ではパースエラー、実行には `--allow-unsupported` が必要。各ファイル先頭に注記あり、Fase2 対象）:**
 
 - `01_lp_production` `02_milp_facility` `03_nlp_portfolio` `04_convex_svm` `05_qp_regression`
 - `06_dp_inventory` `07_stochastic_farmer` `08_combinatorial_tsp` `09_metaheuristic_vrp` `10_cp_scheduling`
 - `11_moo_supply_chain` `12_ml_optimization` `13_largescale_decomposition`
 - `advanced_features` `juku_timetabling`
 
-> examples の「実行可能 / 将来仕様」ディレクトリ分割は別 Issue（#3 完了条件②）で対応予定。
+> 実行可能サンプルは `examples/` 直下、将来仕様サンプルは `examples/experimental/` に分離済み（#3 完了条件②）。
