@@ -349,6 +349,16 @@ impl P {
                 Ok(Expr::Func(f, args))
             }
             _ => {
+                // 組み込み関数でない識別子の直後に `(` が来たらユーザー定義関数呼び出し。
+                // 未対応（Issue #3）なので曖昧なシンボル解釈（trailing tokens）に落とさず
+                // 明示エラーにする。正当な添字参照 `x[i]` は `[` なので影響しない。
+                if self.peek() == Some(&Tok::LPar) {
+                    return Err(format!(
+                        "unknown function '{}': user-defined functions are not supported \
+                         (see docs/SPEC_SUPPORT.md)",
+                        id
+                    ));
+                }
                 // symbol with optional [idx, ...]（添字は識別子/数値のカンマ区切り）
                 let mut idx = Vec::new();
                 if self.peek() == Some(&Tok::LBracket) {
@@ -715,6 +725,17 @@ mod tests {
     #[test]
     fn unknown_function_errors() {
         assert!(compile("frobnicate(1)").is_err());
+    }
+
+    /// Issue #3: ユーザー定義関数呼び出し `total_cost(i)` は明快なエラーにする。
+    #[test]
+    fn user_defined_function_call_errors_clearly() {
+        let err = compile("total_cost(i)").unwrap_err();
+        assert!(
+            err.contains("unknown function") && err.contains("total_cost"),
+            "should name the unknown function, got: {}",
+            err
+        );
     }
 
     #[test]
