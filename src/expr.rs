@@ -407,16 +407,42 @@ impl P {
                         id
                     ));
                 }
-                // symbol with optional [idx, ...]（添字は識別子/数値のカンマ区切り）
+                // symbol with optional [idx, ...]（添字は識別子/数値のカンマ区切り）。
+                // 各要素は base に続けて任意で `± 整数リテラル` を許可する（#9: `t-1`/`t+1`）。
+                // それより複雑な添字式（`t*2`, `t+1.5`, `t-s` 等）は明示エラーにする。
                 let mut idx = Vec::new();
                 if self.peek() == Some(&Tok::LBracket) {
                     self.i += 1; // consume '['
                     loop {
-                        match self.next() {
-                            Some(Tok::Ident(s)) => idx.push(s),
-                            Some(Tok::Num(n)) => idx.push(fmt_index(n)),
+                        let base = match self.next() {
+                            Some(Tok::Ident(s)) => s,
+                            Some(Tok::Num(n)) => fmt_index(n),
                             o => return Err(format!("bad index token {:?}", o)),
-                        }
+                        };
+                        // 添字算術 base ± N（整数リテラルのみ）。`"t-1"` の形で保持し、
+                        // 評価時に base を env 解決してからオフセットを適用する。
+                        let term = match self.peek() {
+                            Some(Tok::Plus) | Some(Tok::Minus) => {
+                                let is_plus = self.peek() == Some(&Tok::Plus);
+                                self.i += 1; // consume +/-
+                                match self.next() {
+                                    Some(Tok::Num(n)) if n.fract() == 0.0 => format!(
+                                        "{}{}{}",
+                                        base,
+                                        if is_plus { '+' } else { '-' },
+                                        n as i64
+                                    ),
+                                    o => {
+                                        return Err(format!(
+                                            "unsupported subscript expression after '{}': only 'base +/- integer' is allowed (e.g. t-1), got {:?}",
+                                            base, o
+                                        ))
+                                    }
+                                }
+                            }
+                            _ => base,
+                        };
+                        idx.push(term);
                         match self.peek() {
                             Some(Tok::Comma) => {
                                 self.i += 1;
@@ -491,6 +517,35 @@ fn fmt_index(n: f64) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// 添字トークンを具体値に解決する（#9）。`"t-1"` の形（base ± 整数オフセット）は
+/// base を env 解決した上で整数オフセットを適用する。プレーンな添字は従来通り env 解決。
+fn resolve_index_token(t: &str, env: &HashMap<String, String>) -> String {
+    if let Some((base, off)) = split_index_offset(t) {
+        let base_val = env.get(base).map(String::as_str).unwrap_or(base);
+        if let Ok(n) = base_val.parse::<i64>() {
+            return (n + off).to_string();
+        }
+        // 非数値 base にはオフセットを適用できない。base をそのまま解決する。
+        return env.get(base).cloned().unwrap_or_else(|| base.to_string());
+    }
+    env.get(t).cloned().unwrap_or_else(|| t.to_string())
+}
+
+/// `"t-1"` -> Some(("t", -1)), `"t+2"` -> Some(("t", 2)), プレーンな添字 -> None。
+/// 位置1以降で最初の +/- を境に base と整数オフセットへ分割する（先頭の負号は対象外）。
+fn split_index_offset(t: &str) -> Option<(&str, i64)> {
+    let pos = t
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| *c == '+' || *c == '-')
+        .map(|(i, _)| i)?;
+    let base = &t[..pos];
+    let sign = t.as_bytes()[pos];
+    let mag: i64 = t[pos + 1..].parse().ok()?;
+    let off = if sign == b'-' { -mag } else { mag };
+    Some((base, off))
 }
 
 pub fn compile(src: &str) -> Result<Expr, String> {
@@ -683,10 +738,7 @@ fn eval_sym(
         }
         return 0.0;
     }
-    let key: Vec<String> = idx
-        .iter()
-        .map(|t| env.get(t).cloned().unwrap_or_else(|| t.clone()))
-        .collect();
+    let key: Vec<String> = idx.iter().map(|t| resolve_index_token(t, env)).collect();
     let k = key.join(",");
     let vk = format!("{}[{}]", name, k);
     if let Some(i) = ctx.var_map.get(&vk) {
@@ -851,6 +903,50 @@ mod tests {
             "should name the unknown function, got: {}",
             err
         );
+    }
+
+    /// Issue #9: 添字算術 `t-1` / `t+1` が env のループ変数を解決してオフセット適用される。
+    #[test]
+    fn subscript_arithmetic_resolves_offset() {
+        let sets = HashMap::new();
+        let params = HashMap::new();
+        // 変数 x[1], x[2], x[3]
+        let mut vm = HashMap::new();
+        vm.insert("x[1]".to_string(), 0usize);
+        vm.insert("x[2]".to_string(), 1usize);
+        vm.insert("x[3]".to_string(), 2usize);
+        let x = [10.0, 20.0, 30.0];
+        let ctx = Ctx {
+            var_map: &vm,
+            params: &params,
+            sets: &sets,
+        };
+        // t=3 のとき x[t-1] は x[2]=20
+        let mut env = HashMap::new();
+        env.insert("t".to_string(), "3".to_string());
+        assert_eq!(eval(&compile("x[t-1]").unwrap(), &x, &env, &ctx), 20.0);
+        // t=1 のとき x[t+1] は x[2]=20
+        env.insert("t".to_string(), "1".to_string());
+        assert_eq!(eval(&compile("x[t+1]").unwrap(), &x, &env, &ctx), 20.0);
+        // オフセット無しの従来の添字も維持（回帰）
+        env.insert("t".to_string(), "3".to_string());
+        assert_eq!(eval(&compile("x[t]").unwrap(), &x, &env, &ctx), 30.0);
+    }
+
+    /// Issue #9: `base ± 整数リテラル` を超える複雑な添字式は明示エラー。
+    #[test]
+    fn complex_subscript_expressions_error() {
+        assert!(compile("x[t*2]").is_err(), "multiplication in subscript");
+        assert!(compile("x[t-s]").is_err(), "identifier offset in subscript");
+        assert!(compile("x[t+1.5]").is_err(), "non-integer offset in subscript");
+    }
+
+    #[test]
+    fn split_index_offset_parses_arithmetic() {
+        assert_eq!(super::split_index_offset("t-1"), Some(("t", -1)));
+        assert_eq!(super::split_index_offset("t+2"), Some(("t", 2)));
+        assert_eq!(super::split_index_offset("t"), None);
+        assert_eq!(super::split_index_offset("3"), None);
     }
 
     #[test]
