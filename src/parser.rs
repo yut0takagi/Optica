@@ -989,6 +989,60 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
 
     let expr_part = expr_part.trim();
 
+    // 条件付き制約: `if <cond> then <branch> else <branch>`（#8）。
+    // then/else の枝が比較演算子を含む「制約」の場合のみ条件付き制約として扱う。
+    // 値としての if 式（`x <= if a then 1 else 2`）は then/else の外側に op があり、
+    // ここでは枝に op が無い（＝下の通常経路で処理される）ため誤検出しない。
+    if let Some(after_if) = expr_part.strip_prefix("if ") {
+        if let (Some(tp), Some(ep)) = (after_if.find(" then "), after_if.rfind(" else ")) {
+            let cond_str = after_if[..tp].trim();
+            let then_str = after_if[tp + 6..ep].trim();
+            let else_str = after_if[ep + 6..].trim();
+            let has_op = |s: &str| s.contains("<=") || s.contains(">=") || s.contains("==");
+            if tp < ep && has_op(then_str) && has_op(else_str) {
+                let cond = crate::expr::compile_cond(cond_str)?;
+                let then_c = split_constraint_body(then_str)?;
+                let else_c = split_constraint_body(else_str)?;
+                let wc = match &where_cond {
+                    Some(s) => Some(crate::expr::compile_cond(s)?),
+                    None => None,
+                };
+                let base_name = if name.is_empty() {
+                    format!("c{}", model.constraints.len())
+                } else {
+                    name.clone()
+                };
+                let envs = forall_envs(&forall_bindings, &model.sets);
+                // 条件を parse 時評価し、where を満たす組み合わせについて then/else の枝を選ぶ。
+                let chosen: Vec<(HashMap<String, String>, bool)> = {
+                    let ctx = model.ctx();
+                    envs.into_iter()
+                        .filter(|env| {
+                            wc.as_ref()
+                                .map(|w| crate::expr::eval_cond_now(w, &[], env, &ctx))
+                                .unwrap_or(true)
+                        })
+                        .map(|env| {
+                            let take_then = crate::expr::eval_cond_now(&cond, &[], &env, &ctx);
+                            (env, take_then)
+                        })
+                        .collect()
+                };
+                for (env, take_then) in chosen {
+                    let (l, o, r) = if take_then { &then_c } else { &else_c };
+                    model.constraints.push(Constraint {
+                        name: base_name.clone(),
+                        lhs: l.clone(),
+                        rhs: r.clone(),
+                        op: *o,
+                        env,
+                    });
+                }
+                return Ok(());
+            }
+        }
+    }
+
     // 演算子を探す。認識できない演算子（<, >, != など）や、複数演算子の連鎖
     // （例: `0 <= x <= 5`）は、修正前は制約を黙って読み捨てて「無制約」を
     // feasible として報告していた（README の「サイレントエラー禁止」保証に
@@ -1026,58 +1080,85 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
         name
     };
 
-    if forall_bindings.is_empty() {
+    // forall の束縛をデカルト積へ展開（束縛が無ければ空 env が1つ）。`where` 条件があれば
+    // パース時に評価してフィルタする（#10）。param はインライン data 由来のもののみ有効。
+    let envs = forall_envs(&forall_bindings, &model.sets);
+    let cond = match &where_cond {
+        Some(s) => Some(crate::expr::compile_cond(s)?),
+        None => None,
+    };
+    // where フィルタを先に評価（model への不変借用）し、真の組み合わせだけを残してから
+    // constraints へ push する（借用の競合を避ける）。
+    let kept: Vec<HashMap<String, String>> = {
+        let ctx = model.ctx();
+        envs.into_iter()
+            .filter(|env| {
+                cond.as_ref()
+                    .map(|c| crate::expr::eval_cond_now(c, &[], env, &ctx))
+                    .unwrap_or(true)
+            })
+            .collect()
+    };
+    for env in kept {
         model.constraints.push(Constraint {
-            name: base_name,
-            lhs: lhs_ast,
-            rhs: rhs_ast,
+            name: base_name.clone(),
+            lhs: lhs_ast.clone(),
+            rhs: rhs_ast.clone(),
             op,
-            env: HashMap::new(),
+            env,
         });
-    } else {
-        // forall の束縛集合をデカルト積へ展開し、組み合わせごとに Constraint を1本生成する。
-        let bound_vars: Vec<String> = forall_bindings.iter().map(|(v, _)| v.clone()).collect();
-        let set_refs: Vec<&str> = forall_bindings.iter().map(|(_, s)| s.as_str()).collect();
-        let value_lists = expand_indices(set_refs, &model.sets);
-
-        // `where` 条件をコンパイル（#10）。パース時に評価してフィルタするため、条件が参照する
-        // param はインライン data / data ブロック由来のもののみ有効（JSON サイドカーは parse
-        // 後に読み込まれる）。条件は param・集合・ループ変数を参照する構造フィルタを想定する。
-        let cond = match &where_cond {
-            Some(s) => Some(crate::expr::compile_cond(s)?),
-            None => None,
-        };
-
-        // where フィルタを先に評価（model への不変借用）し、真の組み合わせだけを残してから
-        // constraints へ push する（借用の競合を避ける）。
-        let kept: Vec<HashMap<String, String>> = {
-            let ctx = model.ctx();
-            cartesian(&value_lists)
-                .into_iter()
-                .filter_map(|combo| {
-                    let mut env = HashMap::new();
-                    for (var, val) in bound_vars.iter().zip(combo.iter()) {
-                        env.insert(var.clone(), val.clone());
-                    }
-                    match &cond {
-                        Some(c) if !crate::expr::eval_cond_now(c, &[], &env, &ctx) => None,
-                        _ => Some(env),
-                    }
-                })
-                .collect()
-        };
-        for env in kept {
-            model.constraints.push(Constraint {
-                name: base_name.clone(),
-                lhs: lhs_ast.clone(),
-                rhs: rhs_ast.clone(),
-                op,
-                env,
-            });
-        }
     }
 
     Ok(())
+}
+
+/// forall 束縛をデカルト積へ展開し、各組み合わせの env（ループ変数→値）を返す（#8/#10）。
+/// 束縛が無ければ空 env を1つ返す。
+fn forall_envs(
+    bindings: &[(String, String)],
+    sets: &HashMap<String, Vec<String>>,
+) -> Vec<HashMap<String, String>> {
+    if bindings.is_empty() {
+        return vec![HashMap::new()];
+    }
+    let bound_vars: Vec<&str> = bindings.iter().map(|(v, _)| v.as_str()).collect();
+    let set_refs: Vec<&str> = bindings.iter().map(|(_, s)| s.as_str()).collect();
+    let value_lists = expand_indices(set_refs, sets);
+    cartesian(&value_lists)
+        .into_iter()
+        .map(|combo| {
+            let mut env = HashMap::new();
+            for (var, val) in bound_vars.iter().zip(combo.iter()) {
+                env.insert(var.to_string(), val.clone());
+            }
+            env
+        })
+        .collect()
+}
+
+/// 単純な制約本体 `lhs <op> rhs` を (lhs式, 演算子, rhs式) へ分割する（#8 の then/else 枝用）。
+fn split_constraint_body(
+    s: &str,
+) -> Result<(crate::expr::Expr, ConstraintOp, crate::expr::Expr), String> {
+    let (op, op_str) = if s.contains("<=") {
+        (ConstraintOp::Le, "<=")
+    } else if s.contains(">=") {
+        (ConstraintOp::Ge, ">=")
+    } else if s.contains("==") {
+        (ConstraintOp::Eq, "==")
+    } else {
+        return Err(format!(
+            "conditional branch '{}' has no supported operator (use <=, >=, or ==)",
+            s
+        ));
+    };
+    let parts: Vec<&str> = s.split(op_str).collect();
+    if parts.len() != 2 {
+        return Err(format!("conditional branch '{}' is malformed", s));
+    }
+    let lhs = crate::expr::compile(parts[0].trim())?;
+    let rhs = crate::expr::compile(parts[1].trim())?;
+    Ok((lhs, op, rhs))
 }
 
 /// 宣言行が整数型（`int`/`Integer`/`integer`）を指定しているか。

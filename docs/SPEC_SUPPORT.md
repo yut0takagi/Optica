@@ -54,7 +54,8 @@ optica model.optica --allow-unsupported   # warning を出してスキップし�
 | `+ - * / ^`、括弧、単項マイナス | supported | Pratt パーサで AST 化 |
 | 組み込み関数 `min max abs sqrt exp log pow` | supported | 引数個数（arity）も検証 |
 | `sum{i in S} expr` / `sum(i in S) expr` | supported | 集合上の総和 |
-| `if cond then a else b` | supported | 条件式 |
+| `if cond then a else b` | supported | 条件式（値）。`x <= if a then 1 else 2` のように制約の辺として使える |
+| `if cond then <制約> else <制約>`（条件付き制約） | supported | 枝が制約（`y<=1` 等）の場合。cond は parse 時に評価し枝を選ぶ（param はインライン data）（#8） |
 | ユーザー定義関数呼び出し `f(i)`（非組み込み） | planned/error | `unknown function 'f': ...` と明示エラー。`def` は未対応 |
 | 制約集合の集約 `max(c in ...)` / `min(c in ...)` | planned | Issue #13 |
 | 添字算術 `x[t-1]` / `x[t+1]` | planned | Issue #9 |
