@@ -27,6 +27,7 @@ optica model.optica --allow-unsupported   # warning を出してスキップし�
 | `param name real;`（値なしスカラー） | supported | 既知シンボルとして登録。サイドカー JSON 等で補完（#5） |
 | `param p[S] real;` + データ | supported | 宣言のみで値が無いまま参照すると既定でエラー（#6, `--allow-missing-params` で 0 許可） |
 | `set S = {A, B, ...};` / `set S = 1..N;` | supported | 列挙・範囲 |
+| `set C = A * B [* ...];`（直積） | supported | タプル要素は `"a,b"` 連結。`x[c]` は `x[a,b]` と一致。オペランドは定義済み集合（#11） |
 | `data:` ブロック / サイドカー `model.json` | supported | 外部データは JSON のみ |
 
 ## 目的関数

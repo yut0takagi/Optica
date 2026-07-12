@@ -607,6 +607,41 @@ fn parse_set(line: &str, sets: &mut HashMap<String, Vec<String>>) -> Result<(), 
             }
         }
 
+        // 直積: A * B [* C ...]（#11）。各オペランドは先に定義済みの集合名。
+        // タプル要素は "a,b" のカンマ連結文字列で保持する。これにより `var x[C]` は
+        // `x[a,b]` を生成し、`x[c]`（c は "a,b" に展開）も同じキーに解決されて一致する。
+        if value.contains('*') {
+            let operands: Vec<&str> = value.split('*').map(|s| s.trim()).collect();
+            let mut lists: Vec<Vec<String>> = Vec::new();
+            for on in &operands {
+                match sets.get(*on) {
+                    Some(v) => lists.push(v.clone()),
+                    None => {
+                        return Err(format!(
+                            "set product '{}': unknown set '{}' (operands must be sets defined earlier)",
+                            value, on
+                        ))
+                    }
+                }
+            }
+            let mut acc: Vec<String> = vec![String::new()];
+            for list in &lists {
+                let mut next = Vec::new();
+                for prefix in &acc {
+                    for e in list {
+                        if prefix.is_empty() {
+                            next.push(e.clone());
+                        } else {
+                            next.push(format!("{},{}", prefix, e));
+                        }
+                    }
+                }
+                acc = next;
+            }
+            sets.insert(name, acc);
+            return Ok(());
+        }
+
         // 集合表記: {1, 2, 3}
         let elems_str = value.trim_matches(|c| c == '{' || c == '}');
         let elems: Vec<String> = elems_str
