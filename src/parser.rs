@@ -908,9 +908,32 @@ fn parse_objective_named(line: &str) -> Result<(String, crate::expr::Expr), Stri
 }
 
 /// `i in S, j in T` 形式の forall ヘッダを `[("i","S"), ("j","T")]` にパースする。
-fn parse_forall_header(header: &str) -> Result<Vec<(String, String)>, String> {
+/// forall ヘッダを束縛リストと任意の `where` フィルタ条件へ分離する（#10）。
+/// 例: `j in JOBS, m in MACHINES where p[j,m] > 0`
+///   -> ([(j,JOBS),(m,MACHINES)], Some("p[j,m] > 0"))
+/// `where` はバインディングの `,` 分割より前に切り出すため、条件中の `,`（`p[j,m]`）で
+/// 壊れない。
+fn parse_forall_header(
+    header: &str,
+) -> Result<(Vec<(String, String)>, Option<String>), String> {
+    // " where"（先頭スペースのみ）をトップレベルの区切りとして最初の1つで分離する。
+    // 末尾スペースを必須にすると `... where :`（空条件）が検出漏れするため、先頭スペースで探す。
+    let (bind_part, where_cond) = match header.find(" where") {
+        Some(pos) => {
+            let cond = header[pos + 6..].trim();
+            if cond.is_empty() {
+                return Err(format!(
+                    "empty 'where' condition in forall: {}",
+                    header
+                ));
+            }
+            (header[..pos].trim(), Some(cond.to_string()))
+        }
+        None => (header.trim(), None),
+    };
+
     let mut v = Vec::new();
-    for part in header.split(',') {
+    for part in bind_part.split(',') {
         let part = part.trim();
         if let Some(in_pos) = part.find(" in ") {
             let var = part[..in_pos].trim().to_string();
@@ -923,7 +946,7 @@ fn parse_forall_header(header: &str) -> Result<Vec<(String, String)>, String> {
             return Err(format!("bad forall binding: {}", part));
         }
     }
-    Ok(v)
+    Ok((v, where_cond))
 }
 
 fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
@@ -950,17 +973,19 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
         ("".to_string(), line)
     };
 
-    // forall プレフィックスを検出し、束縛変数と本体を分離する。
-    let (forall_bindings, expr_part) = if let Some(body) = rest.trim().strip_prefix("forall ") {
-        let colon = body
-            .find(':')
-            .ok_or_else(|| format!("forall missing ':' in constraint: {}", line))?;
-        let header = body[..colon].trim();
-        let tail = body[colon + 1..].trim().to_string();
-        (parse_forall_header(header)?, tail)
-    } else {
-        (Vec::new(), rest.trim().to_string())
-    };
+    // forall プレフィックスを検出し、束縛変数・任意の where 条件・本体を分離する。
+    let (forall_bindings, where_cond, expr_part) =
+        if let Some(body) = rest.trim().strip_prefix("forall ") {
+            let colon = body
+                .find(':')
+                .ok_or_else(|| format!("forall missing ':' in constraint: {}", line))?;
+            let header = body[..colon].trim();
+            let tail = body[colon + 1..].trim().to_string();
+            let (bindings, cond) = parse_forall_header(header)?;
+            (bindings, cond, tail)
+        } else {
+            (Vec::new(), None, rest.trim().to_string())
+        };
 
     let expr_part = expr_part.trim();
 
@@ -1014,11 +1039,34 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
         let bound_vars: Vec<String> = forall_bindings.iter().map(|(v, _)| v.clone()).collect();
         let set_refs: Vec<&str> = forall_bindings.iter().map(|(_, s)| s.as_str()).collect();
         let value_lists = expand_indices(set_refs, &model.sets);
-        for combo in cartesian(&value_lists) {
-            let mut env = HashMap::new();
-            for (var, val) in bound_vars.iter().zip(combo.iter()) {
-                env.insert(var.clone(), val.clone());
-            }
+
+        // `where` 条件をコンパイル（#10）。パース時に評価してフィルタするため、条件が参照する
+        // param はインライン data / data ブロック由来のもののみ有効（JSON サイドカーは parse
+        // 後に読み込まれる）。条件は param・集合・ループ変数を参照する構造フィルタを想定する。
+        let cond = match &where_cond {
+            Some(s) => Some(crate::expr::compile_cond(s)?),
+            None => None,
+        };
+
+        // where フィルタを先に評価（model への不変借用）し、真の組み合わせだけを残してから
+        // constraints へ push する（借用の競合を避ける）。
+        let kept: Vec<HashMap<String, String>> = {
+            let ctx = model.ctx();
+            cartesian(&value_lists)
+                .into_iter()
+                .filter_map(|combo| {
+                    let mut env = HashMap::new();
+                    for (var, val) in bound_vars.iter().zip(combo.iter()) {
+                        env.insert(var.clone(), val.clone());
+                    }
+                    match &cond {
+                        Some(c) if !crate::expr::eval_cond_now(c, &[], &env, &ctx) => None,
+                        _ => Some(env),
+                    }
+                })
+                .collect()
+        };
+        for env in kept {
             model.constraints.push(Constraint {
                 name: base_name.clone(),
                 lhs: lhs_ast.clone(),

@@ -558,6 +558,27 @@ pub fn compile(src: &str) -> Result<Expr, String> {
     Ok(e)
 }
 
+/// 単独の比較条件 `lhs <cmp> rhs` をコンパイルする（#10 の `forall ... where <cond>` 用）。
+pub fn compile_cond(src: &str) -> Result<Cond, String> {
+    let toks = lex(src)?;
+    let mut p = P { t: toks, i: 0 };
+    let lhs = p.parse_expr(0)?;
+    let cmp = p.parse_cmp()?;
+    let rhs = p.parse_expr(0)?;
+    if p.i != p.t.len() {
+        return Err(format!(
+            "trailing tokens in condition from position {}",
+            p.i
+        ));
+    }
+    Ok(Cond { lhs, cmp, rhs })
+}
+
+/// 条件を評価する（#10）。パース時の `where` フィルタでは x=&[] を渡す。
+pub fn eval_cond_now(c: &Cond, x: &[f64], env: &HashMap<String, String>, ctx: &Ctx) -> bool {
+    eval_cond(c, x, env, ctx)
+}
+
 /// Expr 内の（スコープ外＝loop 変数でない）シンボル基底名を収集する。
 pub fn collect_free_syms(e: &Expr, scope: &mut Vec<String>, out: &mut Vec<String>) {
     match e {
@@ -947,6 +968,32 @@ mod tests {
         assert_eq!(super::split_index_offset("t+2"), Some(("t", 2)));
         assert_eq!(super::split_index_offset("t"), None);
         assert_eq!(super::split_index_offset("3"), None);
+    }
+
+    /// Issue #10: 単独条件のコンパイルと評価（where フィルタで使う）。
+    #[test]
+    fn compile_and_eval_condition() {
+        let sets = HashMap::new();
+        let mut pm = HashMap::new();
+        pm.insert("A".to_string(), 5.0);
+        let mut params = HashMap::new();
+        params.insert("p".to_string(), pm);
+        let vm = HashMap::new();
+        let ctx = Ctx {
+            var_map: &vm,
+            params: &params,
+            sets: &sets,
+        };
+        let mut env = HashMap::new();
+        env.insert("i".to_string(), "A".to_string());
+        // p[i] > 0 with i=A, p[A]=5 => true
+        let c = compile_cond("p[i] > 0").unwrap();
+        assert!(eval_cond_now(&c, &[], &env, &ctx));
+        // p[i] > 10 => false
+        let c2 = compile_cond("p[i] > 10").unwrap();
+        assert!(!eval_cond_now(&c2, &[], &env, &ctx));
+        // 条件でない式はエラー
+        assert!(compile_cond("p[i] + 1").is_err());
     }
 
     #[test]
