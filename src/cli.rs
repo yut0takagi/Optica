@@ -13,6 +13,8 @@ pub struct Args {
     pub quiet: bool,
     /// 宣言済みだが値の無いパラメータを 0 として扱い、エラーではなく警告にする（Issue #6）。
     pub allow_missing_params: bool,
+    /// 未対応（planned）構文を検出しても警告に留めてスキップ続行する（Issue #3）。
+    pub allow_unsupported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ impl Args {
                 verbose: false,
                 quiet: false,
                 allow_missing_params: false,
+                allow_unsupported: false,
             });
         }
 
@@ -66,6 +69,7 @@ impl Args {
         let mut verbose = false;
         let mut quiet = false;
         let mut allow_missing_params = false;
+        let mut allow_unsupported = false;
 
         // オプション解析の開始位置。サブコマンド形式 `optica solve <file> [opts]` /
         // `optica bench <dim> [opts]` は先頭トークンを消費するので index 2 から、
@@ -104,6 +108,7 @@ impl Args {
                 "-v" | "--verbose" => verbose = true,
                 "-q" | "--quiet" => quiet = true,
                 "--allow-missing-params" => allow_missing_params = true,
+                "--allow-unsupported" => allow_unsupported = true,
                 _ => {}
             }
             i += 1;
@@ -117,6 +122,7 @@ impl Args {
             verbose,
             quiet,
             allow_missing_params,
+            allow_unsupported,
         })
     }
 }

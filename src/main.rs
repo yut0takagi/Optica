@@ -93,6 +93,28 @@ fn cmd_solve(file: &str, args: &Args) {
         }
     }
 
+    // 未対応構文診断（Issue #3）: def/bellman/transition/terminal/initial は現状スキップされる。
+    // 既定ではエラーにし、--allow-unsupported でのみ警告に留めてスキップ続行する。
+    // dim==0 チェックより前に置き、変数の少ない未対応モデルで "no variables" に埋もれるのを防ぐ。
+    if !model.unsupported.is_empty() {
+        if args.allow_unsupported {
+            eprintln!(
+                "warning: unsupported constructs skipped: {}",
+                model.unsupported.join(", ")
+            );
+        } else {
+            eprintln!(
+                "error: unsupported constructs used: {}",
+                model.unsupported.join(", ")
+            );
+            eprintln!(
+                "hint: these are planned but not yet implemented (see docs/SPEC_SUPPORT.md); \
+                 pass --allow-unsupported to skip them"
+            );
+            std::process::exit(1);
+        }
+    }
+
     if model.dim == 0 {
         eprintln!("error: no variables");
         std::process::exit(1);
@@ -303,6 +325,7 @@ fn cmd_repl() {
                     verbose: false,
                     quiet: false,
                     allow_missing_params: false,
+                    allow_unsupported: false,
                 };
                 if let Command::Solve { file } = &args.command {
                     cmd_solve(file, &args);
