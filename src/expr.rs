@@ -33,6 +33,14 @@ pub enum Func {
     Pow,
 }
 
+/// 集約演算子（`max(i in S) body` / `min(i in S) body` の縮約種別）。
+/// 2引数関数の `Func::Min`/`Func::Max` とは別物（#13）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AggOp {
+    Min,
+    Max,
+}
+
 #[derive(Debug, Clone)]
 pub enum SetRef {
     Named(String),
@@ -43,11 +51,17 @@ pub enum SetRef {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(f64),
-    Sym { name: String, idx: Vec<String> },
+    Sym {
+        name: String,
+        idx: Vec<String>,
+    },
     Neg(Box<Expr>),
     Bin(Op, Box<Expr>, Box<Expr>),
     Func(Func, Vec<Expr>),
     Sum(Vec<(String, SetRef)>, Box<Expr>),
+    /// 集約 min/max: `max(i in S[, j in T...]) body` / `min(...)`。
+    /// 2引数の `Func::Min`/`Func::Max` とは別物（#13）。
+    Agg(AggOp, Vec<(String, SetRef)>, Box<Expr>),
     If(Box<Cond>, Box<Expr>, Box<Expr>),
 }
 
@@ -313,7 +327,42 @@ impl P {
 
                 Ok(Expr::Sum(iters, Box::new(body)))
             }
-            "min" | "max" | "abs" | "sqrt" | "exp" | "log" | "pow" => {
+            "min" | "max" => {
+                self.eat(&Tok::LPar)?;
+                // 2トークン先読みで「集約」か「2引数関数」かを判定する（#13）。
+                // `min(i in S) body` / `max(i in S) body` の集約形は、
+                // 直後が Ident でさらにその次が Ident("in") という形にしかならない。
+                // `min(a, b)` や `min(x[i], y)` 等の2引数関数呼び出しはこの形にならない
+                // （2番目のトークンが `,` や `[` になるため）。
+                // 覗き見のみでトークンは消費しない。
+                let is_agg = matches!(self.t.get(self.i), Some(Tok::Ident(_)))
+                    && matches!(self.t.get(self.i + 1), Some(Tok::Ident(w)) if w == "in");
+                let op = if id == "min" { AggOp::Min } else { AggOp::Max };
+                if is_agg {
+                    let iters = self.parse_iters(&Tok::RPar)?;
+                    self.eat(&Tok::RPar)?;
+                    // sum と同じ規約: + / - の手前で本体パースを止める
+                    // （`max(i in S) a[i] + b` が「max の後に + b」と誤読されないようにする）。
+                    let body = self.parse_expr(11)?;
+                    Ok(Expr::Agg(op, iters, Box::new(body)))
+                } else {
+                    let mut args = Vec::new();
+                    if self.peek() != Some(&Tok::RPar) {
+                        args.push(self.parse_expr(0)?);
+                        while self.peek() == Some(&Tok::Comma) {
+                            self.i += 1;
+                            args.push(self.parse_expr(0)?);
+                        }
+                    }
+                    self.eat(&Tok::RPar)?;
+                    if args.len() != 2 {
+                        return Err(format!("{} expects 2 argument(s), got {}", id, args.len()));
+                    }
+                    let f = if id == "min" { Func::Min } else { Func::Max };
+                    Ok(Expr::Func(f, args))
+                }
+            }
+            "abs" | "sqrt" | "exp" | "log" | "pow" => {
                 self.eat(&Tok::LPar)?;
                 let mut args = Vec::new();
                 if self.peek() != Some(&Tok::RPar) {
@@ -325,8 +374,6 @@ impl P {
                 }
                 self.eat(&Tok::RPar)?;
                 let f = match id.as_str() {
-                    "min" => Func::Min,
-                    "max" => Func::Max,
                     "abs" => Func::Abs,
                     "sqrt" => Func::Sqrt,
                     "exp" => Func::Exp,
@@ -335,8 +382,9 @@ impl P {
                     _ => unreachable!(),
                 };
                 let expected_arity = match f {
-                    Func::Min | Func::Max | Func::Pow => 2,
+                    Func::Pow => 2,
                     Func::Abs | Func::Sqrt | Func::Exp | Func::Log => 1,
+                    Func::Min | Func::Max => unreachable!(),
                 };
                 if args.len() != expected_arity {
                     return Err(format!(
@@ -496,6 +544,22 @@ pub fn collect_free_syms(e: &Expr, scope: &mut Vec<String>, out: &mut Vec<String
             collect_free_syms(body, scope, out);
             scope.truncate(n);
         }
+        Expr::Agg(_, iters, body) => {
+            // Expr::Sum と全く同じ扱い（#13）: 集合名は free symbol として登録し、
+            // ループ変数は本体パースの間だけスコープに積む。これにより
+            // `max(i in Itemz) ...` の未知集合名 typo も sum 同様に検出できる。
+            for (_, set_ref) in iters {
+                if let SetRef::Named(name) = set_ref {
+                    out.push(name.clone());
+                }
+            }
+            let n = scope.len();
+            for (v, _) in iters {
+                scope.push(v.clone());
+            }
+            collect_free_syms(body, scope, out);
+            scope.truncate(n);
+        }
         Expr::If(c, a, b) => {
             collect_free_syms(&c.lhs, scope, out);
             collect_free_syms(&c.rhs, scope, out);
@@ -537,6 +601,7 @@ pub fn eval(e: &Expr, x: &[f64], env: &HashMap<String, String>, ctx: &Ctx) -> f6
         }
         Expr::Func(f, args) => eval_func(*f, args, x, env, ctx),
         Expr::Sum(iters, body) => eval_sum(iters, body, x, env, ctx),
+        Expr::Agg(op, iters, body) => eval_agg(*op, iters, body, x, env, ctx),
         Expr::If(c, a, b) => {
             if eval_cond(c, x, env, ctx) {
                 eval(a, x, env, ctx)
@@ -674,6 +739,56 @@ fn sum_rec(
     env.remove(var);
 }
 
+fn eval_agg(
+    op: AggOp,
+    iters: &[(String, SetRef)],
+    body: &Expr,
+    x: &[f64],
+    env: &HashMap<String, String>,
+    ctx: &Ctx,
+) -> f64 {
+    let mut acc: Option<f64> = None;
+    let mut e2 = env.clone();
+    agg_rec(op, iters, 0, body, x, &mut e2, ctx, &mut acc);
+    // NOTE: 反復集合（の直積）が空の場合、min/max は数学的に未定義。
+    // sum が空集合で 0 を返す挙動に合わせ、ここも 0.0 を返す（#13 の仕様）。
+    acc.unwrap_or(0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agg_rec(
+    op: AggOp,
+    iters: &[(String, SetRef)],
+    k: usize,
+    body: &Expr,
+    x: &[f64],
+    env: &mut HashMap<String, String>,
+    ctx: &Ctx,
+    acc: &mut Option<f64>,
+) {
+    if k == iters.len() {
+        let v = eval(body, x, env, ctx);
+        *acc = Some(match *acc {
+            None => v,
+            Some(cur) => match op {
+                AggOp::Min => cur.min(v),
+                AggOp::Max => cur.max(v),
+            },
+        });
+        return;
+    }
+    let (ref var, ref sref) = iters[k];
+    let vals: Vec<String> = match sref {
+        SetRef::Named(s) => ctx.sets.get(s).cloned().unwrap_or_default(),
+        SetRef::Range(a, b) => (*a..=*b).map(|v| v.to_string()).collect(),
+    };
+    for v in vals {
+        env.insert(var.clone(), v);
+        agg_rec(op, iters, k + 1, body, x, env, ctx, acc);
+    }
+    env.remove(var);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +920,142 @@ mod tests {
         };
         let e = compile("sum(i in S) x[i] + sum(i in S) x[i]").unwrap();
         assert_eq!(eval(&e, &x, &env, &ctx), 4.0);
+    }
+
+    // ---- #13: aggregate max(i in S)/min(i in S) reductions ----
+
+    #[test]
+    fn aggregate_max_min_over_set() {
+        // S = {1,2,3}, x = [2,9,4] -> max=9, min=2
+        let mut sets = HashMap::new();
+        sets.insert("S".to_string(), vec!["1".into(), "2".into(), "3".into()]);
+        let mut vm = HashMap::new();
+        vm.insert("x[1]".to_string(), 0usize);
+        vm.insert("x[2]".to_string(), 1usize);
+        vm.insert("x[3]".to_string(), 2usize);
+        let x = [2.0, 9.0, 4.0];
+        let env = HashMap::new();
+        let params = HashMap::new();
+        let ctx = Ctx {
+            var_map: &vm,
+            params: &params,
+            sets: &sets,
+        };
+
+        let e_max = compile("max(i in S) x[i]").unwrap();
+        assert_eq!(eval(&e_max, &x, &env, &ctx), 9.0);
+
+        let e_min = compile("min(i in S) x[i]").unwrap();
+        assert_eq!(eval(&e_min, &x, &env, &ctx), 2.0);
+    }
+
+    #[test]
+    fn aggregate_body_with_arithmetic() {
+        // max(i in S) (x[i] + 1), S={1,2,3}, x=[2,9,4] -> max(3,10,5) = 10
+        let mut sets = HashMap::new();
+        sets.insert("S".to_string(), vec!["1".into(), "2".into(), "3".into()]);
+        let mut vm = HashMap::new();
+        vm.insert("x[1]".to_string(), 0usize);
+        vm.insert("x[2]".to_string(), 1usize);
+        vm.insert("x[3]".to_string(), 2usize);
+        let x = [2.0, 9.0, 4.0];
+        let env = HashMap::new();
+        let params = HashMap::new();
+        let ctx = Ctx {
+            var_map: &vm,
+            params: &params,
+            sets: &sets,
+        };
+        let e = compile("max(i in S) (x[i] + 1)").unwrap();
+        assert_eq!(eval(&e, &x, &env, &ctx), 10.0);
+    }
+
+    #[test]
+    fn aggregate_nested_min_max() {
+        // max(i in S) min(j in T) p[i, j]
+        // S=T={1,2}, p[1,1]=5 p[1,2]=1 p[2,1]=3 p[2,2]=8
+        // -> min over j: i=1 -> 1, i=2 -> 3; max over i: 3
+        let mut sets = HashMap::new();
+        sets.insert("S".to_string(), vec!["1".into(), "2".into()]);
+        sets.insert("T".to_string(), vec!["1".into(), "2".into()]);
+        let mut params = HashMap::new();
+        let mut p = HashMap::new();
+        p.insert("1,1".into(), 5.0);
+        p.insert("1,2".into(), 1.0);
+        p.insert("2,1".into(), 3.0);
+        p.insert("2,2".into(), 8.0);
+        params.insert("p".to_string(), p);
+        let vm = HashMap::new();
+        let x: [f64; 0] = [];
+        let env = HashMap::new();
+        let ctx = Ctx {
+            var_map: &vm,
+            params: &params,
+            sets: &sets,
+        };
+        let e = compile("max(i in S) min(j in T) p[i, j]").unwrap();
+        assert_eq!(eval(&e, &x, &env, &ctx), 3.0);
+    }
+
+    #[test]
+    fn aggregate_empty_set_returns_zero() {
+        // 反復集合が空の場合、min/max は未定義。sum の空集合=0 の挙動に合わせ 0.0 を返す。
+        let mut sets = HashMap::new();
+        sets.insert("Empty".to_string(), Vec::<String>::new());
+        let vm = HashMap::new();
+        let params = HashMap::new();
+        let x: [f64; 0] = [];
+        let env = HashMap::new();
+        let ctx = Ctx {
+            var_map: &vm,
+            params: &params,
+            sets: &sets,
+        };
+        let e = compile("max(i in Empty) i").unwrap();
+        assert_eq!(eval(&e, &x, &env, &ctx), 0.0);
+    }
+
+    #[test]
+    fn aggregate_vs_two_arg_function_do_not_cross_trigger() {
+        // 2引数関数形は引き続き動作し、集約と誤認されないこと（#13 の要）。
+        assert_eq!(ev("max(2, 7)"), 7.0);
+        assert_eq!(ev("min(2, 7)"), 2.0);
+        // 第1引数が裸の識別子でも（2番目のトークンが `in` ではなく `,`）関数形と判定される。
+        assert!(compile("max(a, b)").is_ok());
+        assert_eq!(ev("max(a, b)"), 0.0); // a, b は未定義シンボル -> 0 にフォールバック
+                                          // 第1引数が添字付きシンボルでも（2番目のトークンが `[`）関数形と判定される。
+        assert!(compile("max(p[1], q[2])").is_ok());
+        // 集約形は引き続き2トークン先読みで正しく判定される。
+        assert!(compile("max(i in S) x[i]").is_ok());
+    }
+
+    #[test]
+    fn collect_free_syms_includes_aggregate_set_name() {
+        // 回帰テスト（#13）: sum と同様、集約 min/max のヘッダ集合名も free symbol として
+        // 収集され、typo'd な集合名が未知シンボル検証で捕捉できること。
+        let e = compile("max(i in Itemz) x[i]").unwrap();
+        let mut scope = Vec::new();
+        let mut free = Vec::new();
+        collect_free_syms(&e, &mut scope, &mut free);
+        assert!(
+            free.contains(&"Itemz".to_string()),
+            "expected aggregate's set name 'Itemz' to appear in free syms, got {:?}",
+            free
+        );
+    }
+
+    #[test]
+    fn issue13_nested_max_min_from_moo_supply_chain_parses() {
+        // examples/11_moo_supply_chain.optica の max_lead_time 目的関数と同じ形。
+        // 修正前は `max`/`min` が2引数関数専用だったため
+        // "parse error: expected RPar" になっていた。集約対応後はパースが成功すること
+        // （このオブジェクトの意味論的な妥当性は本 issue のスコープ外）。
+        let src = "max(c in CUSTOMERS)\n    min(s in SUPPLIERS, f in FACTORIES, w in WAREHOUSES)\n        lead_time[s, f] + production_time[f] + transport_time[f, w] + delivery_time[w, c]";
+        let result = compile(src);
+        assert!(
+            result.is_ok(),
+            "expected nested aggregate max/min to parse without RPar error, got {:?}",
+            result
+        );
     }
 }
