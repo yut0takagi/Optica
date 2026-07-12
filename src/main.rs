@@ -52,6 +52,7 @@ OPTIONS:
     -t, --threads <N>       Threads (default: auto)
     -v, --verbose           Verbose output
     -q, --quiet             Quiet mode
+    --allow-missing-params  Treat declared-but-unset parameters as 0 (warn, don't error)
 
 EXAMPLES:
     optica model.optica
@@ -97,6 +98,28 @@ fn cmd_solve(file: &str, args: &Args) {
         std::process::exit(1);
     }
 
+    // 未設定パラメータ診断（Issue #6/#5）: 宣言だけされ値の無いパラメータを参照するモデルは、
+    // 暗黙 0 評価で偽の `Objective: 0` を返しがち。既定ではエラーにし、明示フラグでのみ許可する。
+    let missing = model.missing_params();
+    if !missing.is_empty() {
+        if args.allow_missing_params {
+            eprintln!(
+                "warning: parameters with no value are treated as 0: {}",
+                missing.join(", ")
+            );
+        } else {
+            eprintln!(
+                "error: parameters declared but never given a value: {}",
+                missing.join(", ")
+            );
+            eprintln!(
+                "hint: provide values via a data block or a sidecar JSON, \
+                 or pass --allow-missing-params to treat them as 0"
+            );
+            std::process::exit(1);
+        }
+    }
+
     if args.verbose {
         eprintln!(
             "[optica] dim={}, method={}, threads={}",
@@ -106,8 +129,11 @@ fn cmd_solve(file: &str, args: &Args) {
 
     // CP制約があればCP-SATで解く
     let has_cp = !model.cp_globals.is_empty();
+    // 最適性を証明できる backend（CP-SAT）で解けたか。ヒューリスティック経路では false。
+    let mut exact_backend = false;
     let (best, _fitness, iters) = if has_cp {
         if let Some(res) = crate::solver::solve_cp_entry(&model, args.max_iter, args.threads) {
+            exact_backend = true;
             res
         } else {
             eprintln!("cp-sat unavailable; fallback to heuristic");
@@ -122,14 +148,16 @@ fn cmd_solve(file: &str, args: &Args) {
     // 丸め済み best で目的関数を再評価し、表示用 obj（実際の目的値）を得る。
     // fitness は内部（最小化）規約: maximize なら符号反転して obj と揃える。
     let obj = model.evaluate_objective(&best);
-    let fitness = if model.maximize { -obj } else { obj };
+
+    // 解ステータスは目的値の大小ではなく制約充足と backend の証明能力で決める（Issue #23）。
+    let status = crate::solver::classify_status(&model, &best, exact_backend);
 
     let elapsed = start.elapsed();
 
     if args.quiet {
         println!("{:.6e}", obj);
     } else {
-        print_result(&model, &best, obj, fitness, iters, elapsed);
+        print_result(&model, &best, obj, status, iters, elapsed);
     }
 }
 
@@ -161,18 +189,11 @@ fn print_result(
     model: &parser::Model,
     best: &[f64],
     obj: f64,
-    fitness: f64,
+    status: crate::solver::SolveStatus,
     iters: usize,
     elapsed: std::time::Duration,
 ) {
-    println!(
-        "\nStatus: {}",
-        if fitness.abs() < TOLERANCE {
-            "optimal"
-        } else {
-            "feasible"
-        }
-    );
+    println!("\nStatus: {}", status.as_str());
     println!("Objective: {:.6e}", obj);
     println!("Time: {:.3}s", elapsed.as_secs_f64());
     println!("Iterations: {}", iters);
@@ -281,6 +302,7 @@ fn cmd_repl() {
                         .unwrap_or(1),
                     verbose: false,
                     quiet: false,
+                    allow_missing_params: false,
                 };
                 if let Command::Solve { file } = &args.command {
                     cmd_solve(file, &args);

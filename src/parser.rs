@@ -125,6 +125,42 @@ impl Model {
 
         (feasible, total_violation)
     }
+
+    /// 宣言済みだが値が一つも与えられていない（空マップの）パラメータのうち、
+    /// 目的関数・制約で実際に参照されているものの名前を返す（ソート済み・重複なし）。
+    ///
+    /// 値マップは JSON サイドカーや data ブロックで補完されると非空になるため、補完済みの
+    /// パラメータは対象外。呼び出し側（main）はこれを使い、暗黙 0 評価による偽の
+    /// `Objective: 0`（Issue #6）を診断する。JSON 読み込み後に呼ぶこと。
+    pub fn missing_params(&self) -> Vec<String> {
+        // 参照されている基底シンボル名を収集（forall 束縛変数はスコープ扱いで除外）。
+        let mut referenced: Vec<String> = Vec::new();
+        if let Some(ref e) = self.objective_ast {
+            let mut scope = Vec::new();
+            crate::expr::collect_free_syms(e, &mut scope, &mut referenced);
+        }
+        for o in &self.objectives {
+            let mut scope = Vec::new();
+            crate::expr::collect_free_syms(&o.ast, &mut scope, &mut referenced);
+        }
+        for c in &self.constraints {
+            let bound: Vec<String> = c.env.keys().cloned().collect();
+            let mut scope = bound.clone();
+            crate::expr::collect_free_syms(&c.lhs, &mut scope, &mut referenced);
+            let mut scope = bound;
+            crate::expr::collect_free_syms(&c.rhs, &mut scope, &mut referenced);
+        }
+        let referenced: std::collections::HashSet<String> = referenced.into_iter().collect();
+
+        let mut missing: Vec<String> = self
+            .params
+            .iter()
+            .filter(|(name, vals)| vals.is_empty() && referenced.contains(name.as_str()))
+            .map(|(name, _)| name.clone())
+            .collect();
+        missing.sort();
+        missing
+    }
 }
 
 /// ソースコードをパース
@@ -577,11 +613,17 @@ fn parse_param(
             params.insert(name, map);
         }
     } else {
-        // 値なし: param value[Items] real;
+        // 値なし宣言。後段で JSON サイドカーや data ブロックから補完される想定なので、
+        // 値マップは空のまま「既知シンボル」として登録する（未知シンボル検証を通すため）。
         let name_part = line[6..].trim();
         if let Some(bracket) = name_part.find('[') {
+            // インデックス付き: `param value[Items] real;`
             let name = name_part[..bracket].trim().to_string();
             params.insert(name, HashMap::new());
+        } else if let Some(name) = name_part.split_whitespace().next() {
+            // スカラー: `param min_return real;`（先頭トークンが名前、後続は型注釈）。
+            // 従来はここで何も登録されず、参照側が `unknown symbol` になっていた（Issue #5）。
+            params.insert(name.to_string(), HashMap::new());
         }
     }
 
