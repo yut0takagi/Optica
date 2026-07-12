@@ -67,8 +67,13 @@ impl Args {
         let mut quiet = false;
         let mut allow_missing_params = false;
 
-        let start_idx = match command {
-            Command::Solve { .. } if !args[0].starts_with('-') => 2,
+        // オプション解析の開始位置。サブコマンド形式 `optica solve <file> [opts]` /
+        // `optica bench <dim> [opts]` は先頭トークンを消費するので index 2 から、
+        // ファイル直指定形式 `optica <file> [opts]` はファイルが index 0 なので index 1 から。
+        // 従来は Solve 全般を index 2 起点にしていたため、直指定形式の index 1 の
+        // オプション（`optica m.optica -q` の `-q` 等）が読み飛ばされていた（Issue #4）。
+        let start_idx = match cmd_str.as_str() {
+            "solve" | "bench" => 2,
             _ => 1,
         };
 

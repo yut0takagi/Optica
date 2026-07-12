@@ -461,13 +461,47 @@ fn is_top_level_start(line: &str) -> bool {
 /// 行末が単独の `:` で終わる行（＝本体が次行以降にある行。ただし `subject to:`/`objectives:`/
 /// `data:` は除く）は、次のトップレベルキーワード、またはインデントが自身以下に戻るまで、
 /// 後続行を空白連結して1つの論理文にする。
+/// 行末インラインコメント（`#` または `//`）を、文字列リテラル外である場合にのみ除去して返す。
+///
+/// `"..."` / `'...'` の内側にある `#` や `//` は URL やラベル（例: `"http://x"`, `"a#b"`）の
+/// 一部としてそのまま残す。`#`/`/`/`"`/`'` はいずれも ASCII なので、切り出し位置 `i` は
+/// 常に UTF-8 の文字境界であり、日本語コメントが混じっていても安全にスライスできる。
+fn strip_inline_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    // 文字列リテラル内なら開始クォート文字を保持、外なら None。
+    let mut in_str: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match in_str {
+            Some(quote) => {
+                if c == quote {
+                    in_str = None;
+                }
+            }
+            None => {
+                if c == b'"' || c == b'\'' {
+                    in_str = Some(c);
+                } else if c == b'#' || (c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/') {
+                    return &line[..i];
+                }
+            }
+        }
+        i += 1;
+    }
+    line
+}
+
 fn logical_statements(source: &str) -> Vec<String> {
     let mut raw: Vec<(usize, String)> = Vec::new();
-    for line in source.lines() {
+    for raw_line in source.lines() {
+        // 行末インラインコメント（`#` / `//`）を除去する。行頭コメント・空行はこれで空になる。
+        let line = strip_inline_comment(raw_line);
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+        if trimmed.is_empty() {
             continue;
         }
+        // インデントはコメント除去後も先頭空白が変わらないため元行から算出して問題ない。
         let indent = line.len() - line.trim_start().len();
         raw.push((indent, trimmed.to_string()));
     }
@@ -1066,5 +1100,26 @@ mod tests {
             }
             other => panic!("expected Epsilon pareto method, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn strip_inline_comment_removes_trailing_hash_and_slashes() {
+        assert_eq!(strip_inline_comment("var x >= 0;  # c"), "var x >= 0;  ");
+        assert_eq!(strip_inline_comment("var x >= 0;  // c"), "var x >= 0;  ");
+        assert_eq!(strip_inline_comment("no comment here"), "no comment here");
+        assert_eq!(strip_inline_comment("# whole line"), "");
+    }
+
+    #[test]
+    fn strip_inline_comment_preserves_hash_inside_string() {
+        // 文字列リテラル内の `#` / `//` は壊さない（Issue #12: 「文字列中の # を壊さない」）。
+        assert_eq!(
+            strip_inline_comment("set S = {\"a#b\"};  # c"),
+            "set S = {\"a#b\"};  "
+        );
+        assert_eq!(
+            strip_inline_comment("param url = \"http://x\";  // note"),
+            "param url = \"http://x\";  "
+        );
     }
 }
