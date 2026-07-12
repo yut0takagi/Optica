@@ -341,6 +341,17 @@ pub fn parse(source: &str) -> Result<Model, String> {
             }
         } else if in_subject_to && !line.is_empty() {
             parse_constraint(line, &mut model)?;
+        } else if line.starts_with("forall") {
+            // ここに到達する `forall` は subject to コンテキスト外にある（ブロック形式は
+            // 直前の `in_subject_to` 分岐、インライン形式は `subject to ...` 分岐で
+            // 既に parse_constraint に渡っているため、両方の正当形式はここに来ない）。
+            // 従来はどの分岐にもマッチせずサイレントに読み捨てられ、制約が一切
+            // 適用されないまま「無制約の最適値」を feasible として報告していた。
+            // README の「サイレントエラー禁止」保証に反するため明示エラーにする。
+            return Err(format!(
+                "'forall' must appear inside a 'subject to' block: {}",
+                line
+            ));
         }
     }
 
