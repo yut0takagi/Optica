@@ -2,8 +2,8 @@
 
 **Ultra-fast Optimization DSL**
 
-純粋Rust実装。デフォルトは依存最小・ヒューリスティック。  
-CP-SAT (OR-Tools) はオプション機能（`--features cp-sat`）で有効化。
+純粋Rust実装。デフォルトは依存最小・ヒューリスティック（差分進化/PSO/ハイブリッド）で、追加のネイティブ依存なしにビルド・実行できます。  
+CP-SAT (OR-Tools) 連携はオプション機能（`--features cp-sat`）ですが、**実験的・未検証**です（下記「CP-SAT機能について」を参照）。
 
 ## インストール / ビルド
 
@@ -30,6 +30,8 @@ cargo build --release --features cp-sat
 ```
 
 > CP-SATの依存が整っていない環境で `--features cp-sat` を付けるとビルドが失敗します。デフォルト機能のみであれば純Rustでビルド可能です。
+>
+> **CP-SAT機能について**: `--features cp-sat` はネイティブの OR-Tools インストールを前提とする実験的機能で、本リポジトリの開発環境ではビルド・動作確認ができていません（未検証）。デフォルトビルド（純Rustヒューリスティック）のみが動作確認済みです。CP-SATを利用する場合は自己責任でビルド・検証してください。
 
 ```bash
 # Rust必須
@@ -76,13 +78,55 @@ maximize profit: sum{i in Items} value[i] * x[i];
 subject to capacity: sum{i in Items} weight[i] * x[i] <= 10;
 ```
 
-## パフォーマンス（最新ベンチ、DE基準）
+式はパース時に一度だけ AST（`src/expr.rs`、Pratt パーサ）にコンパイルされ、以後は再解析なしに評価されます。
 
-| 次元 | シングル(DE) | 並列(DE,10T) | 高速化 |
-|------|--------------|--------------|--------|
-| 100  | 14.6ms | **5.0ms** | 2.9x |
-| 500  | 38.1ms | **14.7ms** | 2.6x |
-| 1000 | 75.5ms | **28.6ms** | 2.6x |
+- **演算子**: `+ - * / ^`（べき乗、右結合）、単項マイナス、`(...)` による優先順位制御
+- **関数**: `min(a,b)` `max(a,b)` `abs(x)` `sqrt(x)` `exp(x)` `log(x)` `pow(a,b)`
+- **集合和**: `sum{i in SET} expr` / `sum(i in SET) expr`（複数添字・カンマ区切りも可）
+- **条件式**: `if <cond> then <expr> else <expr>`
+- **複数行ブロック**: `maximize name:` / `minimize name:` / `subject to:` の本体を次の行以降にインデントして書けます
+- **forall 制約展開**: `forall <i> in <SET>[, <j> in <SET2>]:` で集合の直積ぶん制約を自動展開
+- **インライン制約**: `subject to name: <constraint>;` も1行で解釈・適用されます
+- 明示的なパースエラーとして報告されるもの: 未知の関数名、未知のスカラーシンボル、未知の集合名（`sum{i in SET}` の `SET` を含む）、サポート外/不正な比較演算子を使う制約（`<=`/`>=`/`==` 以外、または `0 <= x <= 5` のような連鎖・重複比較）、および `subject to` ブロック外のトップレベル `forall`。これらは実行時に黙ってゼロ評価・無視されるのではなく、明示的なエラーとして報告されます。
+  - **既知の残課題（Fase2 対象、現状はエラーにならず暗黙に 0 として評価されます）**: (a) `x[j]` のような添字トークン内の未束縛変数名の typo は検証されません（`x[A]` のようなリテラル集合要素と区別できないため）。(b) `param` で宣言されたがデータを一切与えられていないパラメータへの参照は、値なしとして黙って 0 扱いになります。
+
+### 整数性（binary / int）
+
+`binary` / `int` で宣言した変数は、丸め込み修復（各反復で最寄りの整数へ丸めてから評価）によって整数解に近づけます。これは**真の MILP（分枝限定法）ソルバーではなく、あくまでメタヒューリスティックによる近似**です。厳密な整数最適性を必要とする用途では `--features cp-sat`（実験的）の利用を検討してください。整数変数の判定はトークン単位で行われるため、たとえば `point` のような変数名が `int` の部分文字列と誤ってマッチすることはありません。
+
+### 動作確認済み（golden）サンプル
+
+以下は既知の最適値に対して golden テスト（`tests/golden.rs` ほか）で検証済みです。
+
+| ファイル | 内容 | 既知最適 |
+|----------|------|----------|
+| `examples/knapsack.optica` | 容量制約付きナップサック（LP緩和） | 容量を守った上での最大利益 |
+| `examples/simple_knapsack.optica` | 単純ナップサック（個数最大化） | count = 2 |
+| `examples/f1_lp_production.optica` | 2製品・1資源のLP | 30 |
+| `examples/f1_knapsack_binary.optica` | 0/1ナップサック | 220 |
+| `examples/f1_nlp_curve.optica` | 非線形（`^`使用） | 1 |
+
+```bash
+cargo run --release -- examples/f1_knapsack_binary.optica -m de -i 2000
+```
+
+### 実験的（experimental）サンプル
+
+`examples/` 配下の以下のファイルは、現行 Optica が未対応の構文（制約集合の集約 `max(c in ...)` 等、`def`/`import`、DP系 `bellman`/`stage`/`state`、確率計画系 `prob[]`/シナリオ、CP系 `no_overlap`/`cumulative` など）を使用している、および/またはパラメータデータが未整備のため、**現状では正しい結果を返しません**（各ファイル先頭に `[EXPERIMENTAL]` コメントを付記済み。Fase2で対応予定）。
+
+`01_lp_production` `02_milp_facility` `03_nlp_portfolio` `04_convex_svm` `05_qp_regression` `06_dp_inventory` `07_stochastic_farmer` `08_combinatorial_tsp` `09_metaheuristic_vrp` `10_cp_scheduling` `11_moo_supply_chain` `12_ml_optimization` `13_largescale_decomposition` `juku_timetabling`
+
+## パフォーマンス
+
+最新のベンチマーク数値はここに固定値として掲載せず、お使いの環境で以下を実行して確認してください（マシン・ビルド設定により結果は変わります）。
+
+```bash
+optica bench 100
+optica bench 500
+optica bench 1000
+```
+
+シングルスレッド(DE)と並列(DE, マルチスレッド)の所要時間が表示されます。
 
 ## ソルバー
 
@@ -98,7 +142,8 @@ subject to capacity: sum{i in Items} weight[i] * x[i] <= 10;
 src/
 ├── main.rs          # CLI
 ├── cli.rs           # 引数解析
-├── parser.rs        # パーサー・式評価・MOO/CP記録・JSONロード
+├── parser.rs        # パーサー（複数行ブロック/forall展開）・MOO/CP記録・JSONロード
+├── expr.rs          # AST式評価器（Pratt パーサ、コンパイル済みExprを評価）
 ├── config.rs        # 定数
 └── solver/
     ├── mod.rs       # ソルバー（DE/PSO/Hybrid、CPサポート入口）
@@ -110,11 +155,12 @@ src/
 ## 特徴 / 制約
 
 - **依存最小**: デフォルトは純Rustヒューリスティック。CP-SATはオプション。
-- **CP-SAT**: `--features cp-sat` 時は OR-Tools の C++ 依存が必須（例: `brew install or-tools`）。依存が無い環境ではビルドエラーになります。
+- **CP-SAT**: `--features cp-sat` は**実験的・未検証**です。有効化時は OR-Tools の C++ 依存が必須（例: `brew install or-tools`）で、依存が無い環境ではビルドエラーになります。
 - **サイドカーJSON**: `model.optica` と同名の `model.json` を自動ロードしてパラメータ補完。
 - **多目的**: 重み付き和 / epsilon をヒューリスティックで評価。
-- **CPグローバル**: `disjunctive` / `no_overlap` / `cumulative` はペナルティ評価。厳密解は `--features cp-sat` + OR-Tools 環境で。
-- **式パーサは簡易版**: 複雑な非線形/入れ子は0評価になる可能性。
+- **CPグローバル**: `disjunctive` / `no_overlap` / `cumulative` はペナルティ評価。厳密解は `--features cp-sat`（実験的）+ OR-Tools 環境で。
+- **整数性は近似**: `binary`/`int` は丸め込み修復による近似で、真のMILP（分枝限定法）ではありません。
+- **式パーサはAST化済み**: `+ - * / ^`・関数（`min max abs sqrt exp log pow`）・`sum{..}`/`sum(..)`・`if..then..else`・複数行ブロック・`forall`展開に対応し、複雑な入れ子式も正しく評価されます。未対応なのは、制約集合の集約（`max(c in ...)` のような式）、`def`/`import`、DP（`bellman`/`stage`/`state`）・確率計画（`prob[]`/シナリオ）・CP（`no_overlap`/`cumulative`）の専用意味論です（Fase2対象）。
 - **JSONのみ対応**: 外部データ読み込みはJSONのサイドカーでのみサポート。
 - **警告**: `sphere` 未使用などの警告が出る場合がありますが動作に影響はありません。
 

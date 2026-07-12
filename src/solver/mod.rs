@@ -36,8 +36,6 @@ pub use rng::Rng;
 const PENALTY_COEFF: f64 = 1e6;
 static PENALTY_ENV: OnceLock<f64> = OnceLock::new();
 
-pub mod cpsat;
-
 // =============================================================================
 // 差分進化（DE）
 // =============================================================================
@@ -77,7 +75,9 @@ fn de_single(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
     let mut rnd_cr = vec![0.0; dim];
 
     // メインループ
+    let mut stall = 0usize;
     for iter in 0..max_iter {
+        let mut improved = false;
         for i in 0..POP_SIZE {
             // 親選択
             let (r1, r2) = pop.select_parents(&mut rng, i);
@@ -94,15 +94,20 @@ fn de_single(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
             if trial_fit <= pop.fit[i] {
                 pop.update(i, &trial, trial_fit);
 
-                if trial_fit < best_fit {
+                if trial_fit < best_fit - TOLERANCE {
                     best_fit = trial_fit;
                     best.copy_from_slice(&trial);
-
-                    if best_fit < TOLERANCE {
-                        return (best, best_fit, iter + 1);
-                    }
+                    improved = true;
                 }
             }
+        }
+        if improved {
+            stall = 0;
+        } else {
+            stall += 1;
+        }
+        if stall >= STALL_ITERS {
+            return (best, best_fit, iter + 1);
         }
     }
 
@@ -132,7 +137,9 @@ fn de_parallel(model: &Model, max_iter: usize, threads: usize) -> (Vec<f64>, f64
                 let mut trial = vec![0.0; dim];
                 let mut rnd_cr = vec![0.0; dim];
 
+                let mut stall = 0usize;
                 for _iter in 0..max_iter {
+                    let mut improved = false;
                     for i in 0..sub_pop {
                         let (r1, r2) = pop.select_parents(&mut rng, i);
                         let j_rand = rng.usize(dim);
@@ -145,14 +152,20 @@ fn de_parallel(model: &Model, max_iter: usize, threads: usize) -> (Vec<f64>, f64
                         let trial_fit = compute_fitness(&model, &trial);
                         if trial_fit <= pop.fit[i] {
                             pop.update(i, &trial, trial_fit);
-                            if trial_fit < best_fit {
+                            if trial_fit < best_fit - TOLERANCE {
                                 best_fit = trial_fit;
                                 best.copy_from_slice(&trial);
-                                if best_fit < TOLERANCE {
-                                    return (best, best_fit);
-                                }
+                                improved = true;
                             }
                         }
+                    }
+                    if improved {
+                        stall = 0;
+                    } else {
+                        stall += 1;
+                    }
+                    if stall >= STALL_ITERS {
+                        return (best, best_fit);
                     }
                 }
 
@@ -243,7 +256,9 @@ pub fn pso(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
     let mut r2_buf = vec![0.0; dim];
 
     // メインループ
+    let mut stall = 0usize;
     for iter in 0..max_iter {
+        let mut improved = false;
         for i in 0..N_PARTICLES {
             let offset = i * dim;
 
@@ -265,15 +280,21 @@ pub fn pso(model: &Model, max_iter: usize) -> (Vec<f64>, f64, usize) {
                 swarm.pbest_fit[i] = fit;
 
                 // gbest更新
-                if fit < gbest_fit {
+                if fit < gbest_fit - TOLERANCE {
                     gbest_fit = fit;
                     gbest.copy_from_slice(&swarm.pos[offset..offset + dim]);
-
-                    if gbest_fit < TOLERANCE {
-                        return (gbest, gbest_fit, iter + 1);
-                    }
+                    improved = true;
                 }
             }
+        }
+
+        if improved {
+            stall = 0;
+        } else {
+            stall += 1;
+        }
+        if stall >= STALL_ITERS {
+            return (gbest, gbest_fit, iter + 1);
         }
 
         w = (w * PSO_W_DECAY).max(PSO_W_MIN);
@@ -324,6 +345,20 @@ fn pso_update_velocity_position(
 // =============================================================================
 
 fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
+    // 整数（binary/int）フラグの立つ次元を丸めてから評価する（目的・制約の両方に適用）。
+    // `repaired` を if の外で宣言し、branch 内で代入・借用することで所有権とライフタイムを両立させる。
+    let mut repaired: Vec<f64>;
+    let x: &[f64] = if model.var_int.iter().any(|&b| b) {
+        repaired = x.to_vec();
+        for (j, &is_int) in model.var_int.iter().enumerate() {
+            if is_int {
+                repaired[j] = x[j].round().clamp(model.lb[j], model.ub[j]);
+            }
+        }
+        &repaired
+    } else {
+        x
+    };
     // 多目的対応
     if !model.objectives.is_empty() {
         match &model.pareto {
@@ -332,8 +367,12 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
                 let mut total = 0.0;
                 for (name, w) in weights {
                     if let Some(obj) = model.objectives.iter().find(|o| &o.name == name) {
-                        let mut v =
-                            model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                        let mut v = crate::expr::eval(
+                            &obj.ast,
+                            x,
+                            &std::collections::HashMap::new(),
+                            &model.ctx(),
+                        );
                         if obj.maximize {
                             v = -v;
                         }
@@ -347,8 +386,12 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
                 // epsilon制約: primaryを最適化、他は閾値超過にペナルティ
                 let mut v_primary = 0.0;
                 if let Some(obj) = model.objectives.iter().find(|o| &o.name == primary) {
-                    v_primary =
-                        model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                    v_primary = crate::expr::eval(
+                        &obj.ast,
+                        x,
+                        &std::collections::HashMap::new(),
+                        &model.ctx(),
+                    );
                     if obj.maximize {
                         v_primary = -v_primary;
                     }
@@ -356,8 +399,12 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
                 let mut vio_eps = 0.0;
                 for (name, op, rhs) in eps {
                     if let Some(obj) = model.objectives.iter().find(|o| &o.name == name) {
-                        let mut v =
-                            model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                        let mut v = crate::expr::eval(
+                            &obj.ast,
+                            x,
+                            &std::collections::HashMap::new(),
+                            &model.ctx(),
+                        );
                         if obj.maximize {
                             v = -v;
                         }
@@ -375,7 +422,8 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
             _ => {
                 // デフォルト: 先頭の目的を使用
                 let obj = &model.objectives[0];
-                let mut v = model.evaluate_expr(&obj.expr, x, &std::collections::HashMap::new());
+                let mut v =
+                    crate::expr::eval(&obj.ast, x, &std::collections::HashMap::new(), &model.ctx());
                 if obj.maximize {
                     v = -v;
                 }
@@ -392,6 +440,17 @@ fn compute_fitness(model: &Model, x: &[f64]) -> f64 {
     let (_feasible, violation) = model.check_constraints(x);
     let cp_penalty = compute_cp_penalty(model, x);
     obj + (violation + cp_penalty) * penalty_coeff()
+}
+
+/// 整数（binary/int）フラグの立つ次元を丸めた解ベクトルを返す（報告用）。
+pub fn round_integers(model: &Model, x: &[f64]) -> Vec<f64> {
+    let mut v = x.to_vec();
+    for (j, &is_int) in model.var_int.iter().enumerate() {
+        if is_int {
+            v[j] = x[j].round().clamp(model.lb[j], model.ub[j]);
+        }
+    }
+    v
 }
 
 fn penalty_coeff() -> f64 {

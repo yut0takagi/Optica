@@ -1,0 +1,7 @@
+set ITEMS = {A, B, C};
+param value[ITEMS] = {A: 60, B: 100, C: 120};
+param weight[ITEMS] = {A: 10, B: 20, C: 30};
+param capacity = 50;
+var x[ITEMS] binary;
+maximize profit: sum{i in ITEMS} value[i] * x[i];
+subject to cap: sum{i in ITEMS} weight[i] * x[i] <= capacity;

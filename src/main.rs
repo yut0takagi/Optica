@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod expr;
 mod parser;
 mod solver;
 
@@ -105,7 +106,7 @@ fn cmd_solve(file: &str, args: &Args) {
 
     // CP制約があればCP-SATで解く
     let has_cp = !model.cp_globals.is_empty();
-    let (best, fitness, iters) = if has_cp {
+    let (best, _fitness, iters) = if has_cp {
         if let Some(res) = crate::solver::solve_cp_entry(&model, args.max_iter, args.threads) {
             res
         } else {
@@ -116,8 +117,14 @@ fn cmd_solve(file: &str, args: &Args) {
         solve_heuristic(&model, args)
     };
 
+    // 整数（binary/int）変数を丸め、報告用の解と目的値を整合させる
+    let best = crate::solver::round_integers(&model, &best);
+    // 丸め済み best で目的関数を再評価し、表示用 obj（実際の目的値）を得る。
+    // fitness は内部（最小化）規約: maximize なら符号反転して obj と揃える。
+    let obj = model.evaluate_objective(&best);
+    let fitness = if model.maximize { -obj } else { obj };
+
     let elapsed = start.elapsed();
-    let obj = if model.maximize { -fitness } else { fitness };
 
     if args.quiet {
         println!("{:.6e}", obj);

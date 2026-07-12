@@ -11,12 +11,13 @@ pub struct Model {
     pub dim: usize,
     pub lb: Vec<f64>,
     pub ub: Vec<f64>,
+    pub var_int: Vec<bool>,
     pub var_names: Vec<String>,
     pub var_map: HashMap<String, usize>, // 変数名 -> インデックス
     pub maximize: bool,
     pub params: HashMap<String, HashMap<String, f64>>, // パラメータ値
     pub sets: HashMap<String, Vec<String>>,            // 集合
-    pub objective_expr: Option<String>,                // 目的関数式
+    pub objective_ast: Option<crate::expr::Expr>,      // 目的関数AST
     pub constraints: Vec<Constraint>,                  // 制約
     pub objectives: Vec<Objective>,                    // 多目的
     pub pareto: ParetoMethod,
@@ -27,9 +28,11 @@ pub struct Model {
 pub struct Constraint {
     #[allow(dead_code)]
     pub name: String,
-    pub expr: String,
+    pub lhs: crate::expr::Expr,
+    pub rhs: crate::expr::Expr,
     pub op: ConstraintOp,
-    pub rhs: f64,
+    /// forall で束縛された添字変数（例: {"i": "2"}）。forall を伴わない制約では空。
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +45,7 @@ pub enum ConstraintOp {
 #[derive(Debug, Clone)]
 pub struct Objective {
     pub name: String,
-    pub expr: String,
+    pub ast: crate::expr::Expr,
     pub maximize: bool,
 }
 
@@ -62,12 +65,13 @@ impl Model {
             dim: 0,
             lb: Vec::new(),
             ub: Vec::new(),
+            var_int: Vec::new(),
             var_names: Vec::new(),
             var_map: HashMap::new(),
             maximize: false,
             params: HashMap::new(),
             sets: HashMap::new(),
-            objective_expr: None,
+            objective_ast: None,
             constraints: Vec::new(),
             objectives: Vec::new(),
             pareto: ParetoMethod::Single,
@@ -75,15 +79,24 @@ impl Model {
         }
     }
 
+    /// 式評価用の Ctx を構築
+    pub fn ctx(&self) -> crate::expr::Ctx<'_> {
+        crate::expr::Ctx {
+            var_map: &self.var_map,
+            params: &self.params,
+            sets: &self.sets,
+        }
+    }
+
     /// 目的関数を評価
     pub fn evaluate_objective(&self, x: &[f64]) -> f64 {
+        let env = HashMap::new();
         // 単一目的（従来互換）か、多目的の重み付け/epsilonを後段で処理する
-        if let Some(ref expr) = self.objective_expr {
-            self.evaluate_expr(expr, x, &HashMap::new())
-        } else if !self.objectives.is_empty() {
+        if let Some(ref e) = self.objective_ast {
+            crate::expr::eval(e, x, &env, &self.ctx())
+        } else if let Some(o) = self.objectives.first() {
             // 一旦最初の目的を返す（互換のため）。実際の組み合わせはcompute_fitness側で処理。
-            let expr = &self.objectives[0].expr;
-            self.evaluate_expr(expr, x, &HashMap::new())
+            crate::expr::eval(&o.ast, x, &env, &self.ctx())
         } else {
             // デフォルト: Sphere関数
             x.iter().map(|&v| v * v).sum()
@@ -92,15 +105,17 @@ impl Model {
 
     /// 制約違反をチェック
     pub fn check_constraints(&self, x: &[f64]) -> (bool, f64) {
+        let ctx = self.ctx();
         let mut feasible = true;
         let mut total_violation = 0.0;
 
         for constraint in &self.constraints {
-            let lhs = self.evaluate_expr(&constraint.expr, x, &HashMap::new());
+            let l = crate::expr::eval(&constraint.lhs, x, &constraint.env, &ctx);
+            let r = crate::expr::eval(&constraint.rhs, x, &constraint.env, &ctx);
             let v = match constraint.op {
-                ConstraintOp::Le => (lhs - constraint.rhs).max(0.0),
-                ConstraintOp::Ge => (constraint.rhs - lhs).max(0.0),
-                ConstraintOp::Eq => (lhs - constraint.rhs).abs(),
+                ConstraintOp::Le => (l - r).max(0.0),
+                ConstraintOp::Ge => (r - l).max(0.0),
+                ConstraintOp::Eq => (l - r).abs(),
             };
             if v > 1e-9 {
                 feasible = false;
@@ -109,393 +124,6 @@ impl Model {
         }
 
         (feasible, total_violation)
-    }
-
-    /// 式を評価（簡易版）
-    pub fn evaluate_expr(&self, expr: &str, x: &[f64], env: &HashMap<String, String>) -> f64 {
-        let expr = expr.trim();
-
-        // if-then-else
-        if let Some(val) = self.eval_if(expr, x, env) {
-            return val;
-        }
-
-        // sum(...)
-        if expr.starts_with("sum(") || expr.starts_with("sum{") {
-            return self.evaluate_sum(expr, x, env);
-        }
-
-        // 比較（条件用）
-        if let Some(val) = self.eval_comparison(expr, x, env) {
-            return val;
-        }
-
-        // 四則演算
-        self.eval_arith(expr, x, env)
-    }
-
-    fn eval_if(&self, expr: &str, x: &[f64], env: &HashMap<String, String>) -> Option<f64> {
-        let lower = expr.to_lowercase();
-        if let (Some(t_pos), Some(e_pos)) = (lower.find(" then "), lower.find(" else ")) {
-            let cond_str = &expr[..t_pos];
-            let then_str = &expr[t_pos + 6..e_pos];
-            let else_str = &expr[e_pos + 6..];
-            let cond_val = self.eval_condition(cond_str.trim(), x, env);
-            if cond_val {
-                Some(self.evaluate_expr(then_str.trim(), x, env))
-            } else {
-                Some(self.evaluate_expr(else_str.trim(), x, env))
-            }
-        } else {
-            None
-        }
-    }
-
-    fn eval_condition(&self, cond: &str, x: &[f64], env: &HashMap<String, String>) -> bool {
-        // サポート: <, <=, >, >=, ==, !=
-        let ops = ["<=", ">=", "==", "!=", "<", ">"];
-        for op in ops {
-            if let Some(pos) = cond.find(op) {
-                let lhs = cond[..pos].trim();
-                let rhs = cond[pos + op.len()..].trim();
-                let a = self.evaluate_expr(lhs, x, env);
-                let b = self.evaluate_expr(rhs, x, env);
-                return match op {
-                    "<" => a < b,
-                    "<=" => a <= b,
-                    ">" => a > b,
-                    ">=" => a >= b,
-                    "==" => (a - b).abs() < 1e-9,
-                    "!=" => (a - b).abs() >= 1e-9,
-                    _ => false,
-                };
-            }
-        }
-        self.evaluate_expr(cond, x, env) != 0.0
-    }
-
-    fn eval_comparison(&self, expr: &str, x: &[f64], env: &HashMap<String, String>) -> Option<f64> {
-        let ops = ["<=", ">=", "==", "!=", "<", ">"];
-        for op in ops {
-            if let Some(pos) = expr.find(op) {
-                let lhs = expr[..pos].trim();
-                let rhs = expr[pos + op.len()..].trim();
-                let a = self.evaluate_expr(lhs, x, env);
-                let b = self.evaluate_expr(rhs, x, env);
-                let res = match op {
-                    "<" => a < b,
-                    "<=" => a <= b,
-                    ">" => a > b,
-                    ">=" => a >= b,
-                    "==" => (a - b).abs() < 1e-9,
-                    "!=" => (a - b).abs() >= 1e-9,
-                    _ => false,
-                };
-                return Some(if res { 1.0 } else { 0.0 });
-            }
-        }
-        None
-    }
-
-    fn eval_arith(&self, expr: &str, x: &[f64], env: &HashMap<String, String>) -> f64 {
-        // 逆ポーランドへの簡易変換（+ - * / と括弧、単項-）
-        #[derive(Debug, Clone)]
-        enum Tok {
-            Num(f64),
-            Sym(String),
-            Op(char),
-            LPar,
-            RPar,
-            Comma,
-        }
-        fn prec(op: char) -> i32 {
-            match op {
-                '+' | '-' => 1,
-                '*' | '/' => 2,
-                _ => 0,
-            }
-        }
-        // トークナイズ
-        let mut toks: Vec<Tok> = Vec::new();
-        let mut i = 0;
-        let bytes = expr.as_bytes();
-        while i < bytes.len() {
-            let c = bytes[i] as char;
-            if c.is_whitespace() {
-                i += 1;
-                continue;
-            }
-            if c.is_ascii_digit() || c == '.' {
-                let start = i;
-                i += 1;
-                while i < bytes.len()
-                    && ((bytes[i] as char).is_ascii_digit() || bytes[i] as char == '.')
-                {
-                    i += 1;
-                }
-                let s = &expr[start..i];
-                if let Ok(v) = s.parse::<f64>() {
-                    toks.push(Tok::Num(v));
-                }
-                continue;
-            }
-            if c == '(' {
-                toks.push(Tok::LPar);
-                i += 1;
-                continue;
-            }
-            if c == ')' {
-                toks.push(Tok::RPar);
-                i += 1;
-                continue;
-            }
-            if c == ',' {
-                toks.push(Tok::Comma);
-                i += 1;
-                continue;
-            }
-            if "+-*/".contains(c) {
-                toks.push(Tok::Op(c));
-                i += 1;
-                continue;
-            }
-            // identifier or function or symbol with brackets
-            let start = i;
-            i += 1;
-            while i < bytes.len() {
-                let ch = bytes[i] as char;
-                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '[' || ch == ']' || ch == '.' {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            toks.push(Tok::Sym(expr[start..i].to_string()));
-        }
-
-        // Shunting-yard to RPN
-        let mut output: Vec<Tok> = Vec::new();
-        let mut stack: Vec<Tok> = Vec::new();
-        let mut prev_was_op = true;
-        for t in toks {
-            match t {
-                Tok::Num(_) | Tok::Sym(_) => {
-                    output.push(t);
-                    prev_was_op = false;
-                }
-                Tok::Op(op) => {
-                    let mut op_char = op;
-                    // 単項マイナス対応: 前が演算子/左括弧の場合は0を挿入
-                    if op == '-' && prev_was_op {
-                        output.push(Tok::Num(0.0));
-                        op_char = '-';
-                    }
-                    while let Some(Tok::Op(top)) = stack.last() {
-                        if prec(*top) >= prec(op_char) {
-                            output.push(stack.pop().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                    stack.push(Tok::Op(op_char));
-                    prev_was_op = true;
-                }
-                Tok::LPar => {
-                    stack.push(Tok::LPar);
-                    prev_was_op = true;
-                }
-                Tok::RPar => {
-                    while let Some(tok) = stack.pop() {
-                        if let Tok::LPar = tok {
-                            break;
-                        }
-                        output.push(tok);
-                    }
-                    prev_was_op = false;
-                }
-                Tok::Comma => {
-                    // treat as low-precedence separator
-                    while let Some(tok) = stack.last() {
-                        if let Tok::LPar = tok {
-                            break;
-                        }
-                        output.push(stack.pop().unwrap());
-                    }
-                    prev_was_op = true;
-                }
-            }
-        }
-        while let Some(tok) = stack.pop() {
-            output.push(tok);
-        }
-
-        // Evaluate RPN
-        let mut st: Vec<f64> = Vec::new();
-        for tok in output {
-            match tok {
-                Tok::Num(v) => st.push(v),
-                Tok::Sym(s) => {
-                    // max/min functions with one comma arg are handled by Op + special names; but here treat as symbol
-                    let v = self.eval_symbol(&s, x, env);
-                    st.push(v);
-                }
-                Tok::Op(op) => {
-                    if st.len() < 2 {
-                        return 0.0;
-                    }
-                    let b = st.pop().unwrap();
-                    let a = st.pop().unwrap();
-                    let v = match op {
-                        '+' => a + b,
-                        '-' => a - b,
-                        '*' => a * b,
-                        '/' => {
-                            if b.abs() < 1e-12 {
-                                0.0
-                            } else {
-                                a / b
-                            }
-                        }
-                        _ => 0.0,
-                    };
-                    st.push(v);
-                }
-                _ => {}
-            }
-        }
-        st.pop().unwrap_or(0.0)
-    }
-
-    fn eval_symbol(&self, sym: &str, x: &[f64], env: &HashMap<String, String>) -> f64 {
-        // max(...) / min(...)
-        if sym.starts_with("max(") && sym.ends_with(')') {
-            let inner = &sym[4..sym.len() - 1];
-            let parts: Vec<&str> = inner.split(',').collect();
-            if parts.len() == 2 {
-                let a = self.evaluate_expr(parts[0].trim(), x, env);
-                let b = self.evaluate_expr(parts[1].trim(), x, env);
-                return a.max(b);
-            }
-        }
-        if sym.starts_with("min(") && sym.ends_with(')') {
-            let inner = &sym[4..sym.len() - 1];
-            let parts: Vec<&str> = inner.split(',').collect();
-            if parts.len() == 2 {
-                let a = self.evaluate_expr(parts[0].trim(), x, env);
-                let b = self.evaluate_expr(parts[1].trim(), x, env);
-                return a.min(b);
-            }
-        }
-
-        // identifier with optional [..]
-        if let Some(b) = sym.find('[') {
-            let name = &sym[..b];
-            let idx_part = sym[b + 1..].trim_end_matches(']');
-            let idx_tokens: Vec<String> = idx_part
-                .split(',')
-                .map(|t| t.trim())
-                .map(|t| env.get(t).cloned().unwrap_or_else(|| t.to_string()))
-                .collect();
-            let idx_key = idx_tokens.join(",");
-
-            // var
-            let var_key = format!("{}[{}]", name, idx_key);
-            if let Some(idx) = self.var_map.get(&var_key) {
-                return x[*idx];
-            }
-
-            // param
-            if let Some(param_map) = self.params.get(name) {
-                if let Some(v) = param_map.get(&idx_key) {
-                    return *v;
-                }
-            }
-            return 0.0;
-        }
-
-        // スカラーパラメータ
-        if let Some(param_map) = self.params.get(sym) {
-            if let Some(v) = param_map.get("_") {
-                return *v;
-            }
-        }
-
-        // 変数
-        if let Some(idx) = self.var_map.get(sym) {
-            return x[*idx];
-        }
-
-        // 環境（インデックス値を数値化可能なら）
-        if let Some(sv) = env.get(sym) {
-            if let Ok(v) = sv.parse::<f64>() {
-                return v;
-            }
-        }
-
-        0.0
-    }
-
-    /// sum式を評価
-    fn evaluate_sum(&self, expr: &str, x: &[f64], env: &HashMap<String, String>) -> f64 {
-        // 形式: sum(i in SET, j in SET2) body
-        let (header, body) = if let Some(start) = expr.find('(') {
-            if let Some(end) = expr.find(')') {
-                (&expr[start + 1..end], expr[end + 1..].trim())
-            } else {
-                return 0.0;
-            }
-        } else if let Some(start) = expr.find('{') {
-            if let Some(end) = expr.find('}') {
-                (&expr[start + 1..end], expr[end + 1..].trim())
-            } else {
-                return 0.0;
-            }
-        } else {
-            return 0.0;
-        };
-
-        let mut loops: Vec<(String, Vec<String>)> = Vec::new();
-        for part in header.split(',') {
-            if let Some(pos) = part.find(" in ") {
-                let var = part[..pos].trim().to_string();
-                let set_name = part[pos + 4..].trim();
-                let vals = if let Some(set) = self.sets.get(set_name) {
-                    set.clone()
-                } else if let Some(dd) = set_name.find("..") {
-                    let a = set_name[..dd].trim().parse::<i32>().unwrap_or(0);
-                    let b = set_name[dd + 2..].trim().parse::<i32>().unwrap_or(0);
-                    (a..=b).map(|v| v.to_string()).collect()
-                } else {
-                    vec![set_name.to_string()]
-                };
-                loops.push((var, vals));
-            }
-        }
-
-        let mut total = 0.0;
-        fn dfs(
-            model: &Model,
-            loops: &[(String, Vec<String>)],
-            idx: usize,
-            env: &mut HashMap<String, String>,
-            body: &str,
-            x: &[f64],
-            acc: &mut f64,
-        ) {
-            if idx == loops.len() {
-                *acc += model.evaluate_expr(body, x, env);
-                return;
-            }
-            let (ref var, ref vals) = loops[idx];
-            for v in vals {
-                env.insert(var.clone(), v.clone());
-                dfs(model, loops, idx + 1, env, body, x, acc);
-            }
-            env.remove(var);
-        }
-        let mut env2 = env.clone();
-        dfs(self, &loops, 0, &mut env2, body, x, &mut total);
-        total
     }
 }
 
@@ -510,8 +138,9 @@ pub fn parse(source: &str) -> Result<Model, String> {
     let mut primary_obj: Option<String> = None;
     let mut pareto_mode: Option<String> = None;
 
-    for line in source.lines() {
-        let line = line.trim();
+    let statements = logical_statements(source);
+    for stmt in &statements {
+        let line = stmt.trim();
 
         // 空行・コメントをスキップ
         if line.is_empty()
@@ -620,15 +249,15 @@ pub fn parse(source: &str) -> Result<Model, String> {
                 if line.starts_with("maximize") {
                     maximize = true;
                 }
-                let (name, expr) = parse_objective_named(line);
+                let (name, ast) = parse_objective_named(line)?;
                 model.objectives.push(Objective {
                     name: name.clone(),
-                    expr,
+                    ast,
                     maximize,
                 });
-                if model.objective_expr.is_none() {
+                if model.objective_ast.is_none() {
                     model.maximize = maximize;
-                    model.objective_expr = Some(model.objectives.last().unwrap().expr.clone());
+                    model.objective_ast = Some(model.objectives.last().unwrap().ast.clone());
                 }
             }
             continue;
@@ -696,10 +325,33 @@ pub fn parse(source: &str) -> Result<Model, String> {
         } else if line.starts_with("minimize") {
             model.maximize = false;
             parse_objective(line, &mut model)?;
-        } else if line.starts_with("subject to") {
+        } else if let Some(stripped) = line.strip_prefix("subject to") {
             in_subject_to = true;
+            // "subject to" の直後を見る。":"（または空）で始まる場合はブロック
+            // マーカー単体（"subject to:" / "subject to"）とみなし、従来通り
+            // 何もしない（後続のインデント行が個別の制約として下の
+            // `in_subject_to` 分岐で parse_constraint に渡る）。
+            // それ以外の非空文字列が続く場合は "subject to weight_limit:
+            // expr OP rhs;" 形式のインライン制約であり、従来はここで
+            // 握り潰されて制約が一切適用されないバグがあった。同じ
+            // parse_constraint（name: ラベルと forall を扱う）に渡して修正する。
+            let rest = stripped.trim();
+            if !rest.is_empty() && !rest.starts_with(':') {
+                parse_constraint(rest, &mut model)?;
+            }
         } else if in_subject_to && !line.is_empty() {
             parse_constraint(line, &mut model)?;
+        } else if line.starts_with("forall") {
+            // ここに到達する `forall` は subject to コンテキスト外にある（ブロック形式は
+            // 直前の `in_subject_to` 分岐、インライン形式は `subject to ...` 分岐で
+            // 既に parse_constraint に渡っているため、両方の正当形式はここに来ない）。
+            // 従来はどの分岐にもマッチせずサイレントに読み捨てられ、制約が一切
+            // 適用されないまま「無制約の最適値」を feasible として報告していた。
+            // README の「サイレントエラー禁止」保証に反するため明示エラーにする。
+            return Err(format!(
+                "'forall' must appear inside a 'subject to' block: {}",
+                line
+            ));
         }
     }
 
@@ -708,8 +360,106 @@ pub fn parse(source: &str) -> Result<Model, String> {
         model.var_map.insert(name.clone(), i);
     }
 
+    // 未知シンボル検証（既知名 = パラメータ名 ∪ 集合名 ∪ 変数基底名）
+    let mut known: std::collections::HashSet<String> = model.params.keys().cloned().collect();
+    for s in model.sets.keys() {
+        known.insert(s.clone());
+    }
+    for vn in &model.var_names {
+        known.insert(vn.split('[').next().unwrap().to_string());
+    }
+    let check = |e: &crate::expr::Expr, forall_vars: &[String]| -> Result<(), String> {
+        let mut scope: Vec<String> = forall_vars.to_vec();
+        let mut free = Vec::new();
+        crate::expr::collect_free_syms(e, &mut scope, &mut free);
+        for name in free {
+            // env 由来の数値添字（純数字）や既知名は許可
+            if name.parse::<f64>().is_err() && !known.contains(&name) {
+                return Err(format!("unknown symbol: {}", name));
+            }
+        }
+        Ok(())
+    };
+    if let Some(ref e) = model.objective_ast {
+        check(e, &[])?;
+    }
+    for o in &model.objectives {
+        check(&o.ast, &[])?;
+    }
+    for c in &model.constraints {
+        // forall で束縛された添字変数名は既知スコープとして許可する
+        let fv: Vec<String> = c.env.keys().cloned().collect();
+        check(&c.lhs, &fv)?;
+        check(&c.rhs, &fv)?;
+    }
+
     model.dim = model.lb.len();
+    model.var_int.resize(model.dim, false);
     Ok(model)
+}
+
+/// `subject to`/`objectives:`/`data:`/`epsilon:` はブロック開始マーカーであり、
+/// 自身の後続行を吸収（連結）しない（各後続行は parse() が個別に解釈する）。
+/// 特に `epsilon:` は閾値行（`name <= v`）を後続インデント行に持つため、
+/// ここで除外しないと閾値が連結され `epsilon:` スキップに巻き込まれて落ちる。
+fn is_section_marker(line: &str) -> bool {
+    line.starts_with("subject to")
+        || line.starts_with("objectives:")
+        || line.starts_with("data:")
+        || line.starts_with("epsilon:")
+}
+
+/// この行から新しい論理文が始まる（＝直前の論理文への連結を止める）べきトップレベルキーワードか。
+fn is_top_level_start(line: &str) -> bool {
+    line.starts_with("var ")
+        || line.starts_with("param ")
+        || line.starts_with("set ")
+        || line.starts_with("maximize")
+        || line.starts_with("minimize")
+        || line.starts_with("pareto")
+        || is_section_marker(line)
+}
+
+/// ソースを「論理文」の列に再構成する。
+/// コメント・空行を除去した上で、`maximize:`/`minimize:`/制約ラベル/`forall ...:` のように
+/// 行末が単独の `:` で終わる行（＝本体が次行以降にある行。ただし `subject to:`/`objectives:`/
+/// `data:` は除く）は、次のトップレベルキーワード、またはインデントが自身以下に戻るまで、
+/// 後続行を空白連結して1つの論理文にする。
+fn logical_statements(source: &str) -> Vec<String> {
+    let mut raw: Vec<(usize, String)> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        raw.push((indent, trimmed.to_string()));
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let (base_indent, mut joined) = raw[i].clone();
+        i += 1;
+
+        // 行末が（`::` ではなく）単独の `:` で終わる本体待ち行は、後続行を吸収する。
+        let awaits_body =
+            joined.ends_with(':') && !joined.ends_with("::") && !is_section_marker(&joined);
+
+        if awaits_body {
+            while i < raw.len() {
+                let (indent, next_text) = raw[i].clone();
+                if indent <= base_indent || is_top_level_start(&next_text) {
+                    break;
+                }
+                joined.push(' ');
+                joined.push_str(&next_text);
+                i += 1;
+            }
+        }
+        out.push(joined);
+    }
+    out
 }
 
 fn expand_indices(idx_list: Vec<&str>, sets: &HashMap<String, Vec<String>>) -> Vec<Vec<String>> {
@@ -916,7 +666,7 @@ fn parse_var(
     };
 
     // 境界値の解析
-    let (lb, ub) = parse_bounds(line)?;
+    let (lb, ub, is_int) = parse_bounds(line)?;
 
     // インデックスの展開
     let mut combos: Vec<String> = Vec::new();
@@ -932,6 +682,7 @@ fn parse_var(
     for var_name in combos {
         model.lb.push(lb);
         model.ub.push(ub);
+        model.var_int.push(is_int);
         model.var_names.push(var_name);
     }
 
@@ -1003,8 +754,8 @@ fn parse_state_or_decision(
         }
     }
 
-    // intキーワードの確認（将来の拡張用）
-    let _is_int = line.contains(" int") || line.contains(" Integer");
+    // intキーワードの確認（parse_bounds と同一のトークン単位判定を共有）
+    let is_int = is_integer_decl(line);
 
     let mut combos: Vec<String> = Vec::new();
     if let Some(idx_list) = indices {
@@ -1019,6 +770,7 @@ fn parse_state_or_decision(
     for var_name in combos {
         model.lb.push(lb);
         model.ub.push(ub);
+        model.var_int.push(is_int);
         model.var_names.push(var_name);
     }
 
@@ -1029,38 +781,57 @@ fn parse_objective(line: &str, model: &mut Model) -> Result<(), String> {
     // maximize profit: sum{i in Items} value[i] * x[i];
     if let Some(colon) = line.find(':') {
         let expr = line[colon + 1..].trim().trim_end_matches(';');
-        model.objective_expr = Some(expr.to_string());
+        model.objective_ast = Some(crate::expr::compile(expr)?);
     } else {
         // コロンなしの場合
         if let Some(rest) = line.strip_prefix("maximize ") {
-            model
-                .objective_expr
-                .replace(rest.trim().trim_end_matches(';').to_string());
+            model.objective_ast = Some(crate::expr::compile(rest.trim().trim_end_matches(';'))?);
         } else if let Some(rest) = line.strip_prefix("minimize ") {
-            model
-                .objective_expr
-                .replace(rest.trim().trim_end_matches(';').to_string());
+            model.objective_ast = Some(crate::expr::compile(rest.trim().trim_end_matches(';'))?);
         }
     }
     Ok(())
 }
 
-fn parse_objective_named(line: &str) -> (String, String) {
+fn parse_objective_named(line: &str) -> Result<(String, crate::expr::Expr), String> {
     // minimize total_cost: expr
     if let Some(colon) = line.find(':') {
         let head = line[..colon].trim();
-        let expr = line[colon + 1..].trim().trim_end_matches(';').to_string();
+        let expr = line[colon + 1..].trim().trim_end_matches(';');
         let mut parts = head.split_whitespace();
         let _ = parts.next(); // minimize / maximize
         let name = parts.next().unwrap_or("obj").trim().to_string();
-        (name, expr)
+        let ast = crate::expr::compile(expr)?;
+        Ok((name, ast))
     } else {
-        ("obj".to_string(), line.trim_end_matches(';').to_string())
+        let ast = crate::expr::compile(line.trim_end_matches(';'))?;
+        Ok(("obj".to_string(), ast))
     }
+}
+
+/// `i in S, j in T` 形式の forall ヘッダを `[("i","S"), ("j","T")]` にパースする。
+fn parse_forall_header(header: &str) -> Result<Vec<(String, String)>, String> {
+    let mut v = Vec::new();
+    for part in header.split(',') {
+        let part = part.trim();
+        if let Some(in_pos) = part.find(" in ") {
+            let var = part[..in_pos].trim().to_string();
+            let set = part[in_pos + 4..].trim().to_string();
+            if var.is_empty() || set.is_empty() {
+                return Err(format!("bad forall binding: {}", part));
+            }
+            v.push((var, set));
+        } else {
+            return Err(format!("bad forall binding: {}", part));
+        }
+    }
+    Ok(v)
 }
 
 fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     // weight_limit: sum{i in Items} weight[i] * x[i] <= capacity;
+    // forall i in S: x[i] <= 1
+    // cap: forall i in S: x[i] <= 1
     let line = line.trim_end_matches(';');
 
     // CPグローバル制約は記録のみ（簡易ペナルティ用）
@@ -1069,15 +840,36 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
         return Ok(());
     }
 
-    let (name, expr_part) = if let Some(colon) = line.find(':') {
-        (line[..colon].trim().to_string(), &line[colon + 1..])
+    // 先頭のラベル（"name:"）があれば取り出す。ただし "forall ...:" 自体をラベルと誤認しない。
+    let (name, rest) = if let Some(colon) = line.find(':') {
+        let head = line[..colon].trim();
+        if !head.is_empty() && !head.starts_with("forall") {
+            (head.to_string(), line[colon + 1..].trim())
+        } else {
+            ("".to_string(), line)
+        }
     } else {
         ("".to_string(), line)
     };
 
+    // forall プレフィックスを検出し、束縛変数と本体を分離する。
+    let (forall_bindings, expr_part) = if let Some(body) = rest.trim().strip_prefix("forall ") {
+        let colon = body
+            .find(':')
+            .ok_or_else(|| format!("forall missing ':' in constraint: {}", line))?;
+        let header = body[..colon].trim();
+        let tail = body[colon + 1..].trim().to_string();
+        (parse_forall_header(header)?, tail)
+    } else {
+        (Vec::new(), rest.trim().to_string())
+    };
+
     let expr_part = expr_part.trim();
 
-    // 演算子を探す
+    // 演算子を探す。認識できない演算子（<, >, != など）や、複数演算子の連鎖
+    // （例: `0 <= x <= 5`）は、修正前は制約を黙って読み捨てて「無制約」を
+    // feasible として報告していた（README の「サイレントエラー禁止」保証に
+    // 反する重大なバグ）。明示的なパースエラーにする。
     let (op, op_str) = if expr_part.contains("<=") {
         (ConstraintOp::Le, "<=")
     } else if expr_part.contains(">=") {
@@ -1085,54 +877,88 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     } else if expr_part.contains("==") {
         (ConstraintOp::Eq, "==")
     } else {
-        return Ok(()); // 制約ではない
+        return Err(format!(
+            "constraint '{}' has no supported operator (use <=, >=, or ==)",
+            line
+        ));
     };
 
     let parts: Vec<&str> = expr_part.split(op_str).collect();
     if parts.len() != 2 {
-        return Ok(());
+        return Err(format!(
+            "constraint '{}' is malformed (chained/duplicate comparison not supported)",
+            line
+        ));
     }
 
     let lhs = parts[0].trim();
     let rhs_str = parts[1].trim();
 
-    // RHSを数値に変換
-    let rhs = if let Ok(val) = rhs_str.parse::<f64>() {
-        val
+    let lhs_ast = crate::expr::compile(lhs)?;
+    let rhs_ast = crate::expr::compile(rhs_str)?;
+
+    let base_name = if name.is_empty() {
+        format!("c{}", model.constraints.len())
     } else {
-        // パラメータ参照の可能性
-        if let Some(param_map) = model.params.get(rhs_str) {
-            param_map.get("_").copied().unwrap_or(0.0)
-        } else {
-            0.0
-        }
+        name
     };
 
-    model.constraints.push(Constraint {
-        name: if name.is_empty() {
-            format!("c{}", model.constraints.len())
-        } else {
-            name
-        },
-        expr: lhs.to_string(),
-        op,
-        rhs,
-    });
+    if forall_bindings.is_empty() {
+        model.constraints.push(Constraint {
+            name: base_name,
+            lhs: lhs_ast,
+            rhs: rhs_ast,
+            op,
+            env: HashMap::new(),
+        });
+    } else {
+        // forall の束縛集合をデカルト積へ展開し、組み合わせごとに Constraint を1本生成する。
+        let bound_vars: Vec<String> = forall_bindings.iter().map(|(v, _)| v.clone()).collect();
+        let set_refs: Vec<&str> = forall_bindings.iter().map(|(_, s)| s.as_str()).collect();
+        let value_lists = expand_indices(set_refs, &model.sets);
+        for combo in cartesian(&value_lists) {
+            let mut env = HashMap::new();
+            for (var, val) in bound_vars.iter().zip(combo.iter()) {
+                env.insert(var.clone(), val.clone());
+            }
+            model.constraints.push(Constraint {
+                name: base_name.clone(),
+                lhs: lhs_ast.clone(),
+                rhs: rhs_ast.clone(),
+                op,
+                env,
+            });
+        }
+    }
 
     Ok(())
 }
 
-fn parse_bounds(line: &str) -> Result<(f64, f64), String> {
+/// 宣言行が整数型（`int`/`Integer`/`integer`）を指定しているか。
+/// 部分文字列一致は誤検出（`point`/`interval`/`print` 等の変数名）を招くため、
+/// 空白区切りトークンとして厳密に判定する。
+fn is_integer_decl(line: &str) -> bool {
+    line.split_whitespace()
+        .any(|t| matches!(t, "int" | "Integer" | "integer"))
+}
+
+/// 宣言行が binary 型（`binary`/`Binary`）を指定しているか（トークン単位で判定）。
+fn is_binary_decl(line: &str) -> bool {
+    line.split_whitespace()
+        .any(|t| matches!(t, "binary" | "Binary"))
+}
+
+fn parse_bounds(line: &str) -> Result<(f64, f64, bool), String> {
     let mut lb = 0.0f64;
     let mut ub = 1000.0f64;
 
-    // Binary変数
-    if line.contains("binary") || line.contains("Binary") {
-        return Ok((0.0, 1.0));
+    // Binary変数（整数フラグも立てる）
+    if is_binary_decl(line) {
+        return Ok((0.0, 1.0, true));
     }
 
     // Integer変数（境界はそのまま）
-    let is_int = line.contains("int") || line.contains("Integer");
+    let is_int = is_integer_decl(line);
 
     // >= パターン
     if let Some(p) = line.find(">=") {
@@ -1157,5 +983,46 @@ fn parse_bounds(line: &str) -> Result<(f64, f64), String> {
         // デフォルトのまま
     }
 
-    Ok((lb, ub))
+    Ok((lb, ub, is_int))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回帰テスト: 論理行連結が `epsilon:` の閾値行（次のインデント行）を
+    /// 吸収して落とさないこと。吸収すると parse() の `epsilon:` スキップに
+    /// 巻き込まれ eps が空になる（Task 3 導入時のリグレッション）。
+    #[test]
+    fn epsilon_thresholds_are_captured() {
+        let src = [
+            "var x >= 0 <= 10",
+            "var y >= 0 <= 10",
+            "objectives:",
+            "    minimize cost:",
+            "        x",
+            "    minimize spread:",
+            "        y",
+            "pareto method: \"epsilon_constraint\"",
+            "    primary: cost",
+            "    epsilon:",
+            "        spread <= 1",
+            "subject to:",
+            "    c1: x >= 0",
+        ]
+        .join("\n");
+
+        let model = parse(&src).expect("parse");
+        match &model.pareto {
+            ParetoMethod::Epsilon { primary, eps } => {
+                assert_eq!(primary, "cost");
+                assert_eq!(eps.len(), 1, "epsilon thresholds dropped: {:?}", eps);
+                let (name, op, rhs) = &eps[0];
+                assert_eq!(name, "spread");
+                assert!(matches!(op, ConstraintOp::Le), "expected Le, got {:?}", op);
+                assert_eq!(*rhs, 1.0);
+            }
+            other => panic!("expected Epsilon pareto method, got {:?}", other),
+        }
+    }
 }

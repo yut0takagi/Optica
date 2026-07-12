@@ -20,6 +20,9 @@ pub const PSO_W_DECAY: f64 = 0.995;
 pub const TOLERANCE: f64 = 1e-10;
 pub const DISPLAY_TOLERANCE: f64 = 1e-6;
 
+/// 改善が見られない反復数がこれを超えたら停止（早期収束の代替）
+pub const STALL_ITERS: usize = 200;
+
 /// 並列化の閾値
 pub const PARALLEL_MIN_DIM: usize = 50;
 pub const PARALLEL_MIN_ITER: usize = 200;
