@@ -124,11 +124,11 @@ cargo run --release -- examples/f1_knapsack_binary.optica -m de -i 2000
 
 ### 実験的（experimental）サンプル
 
-`examples/` 配下の以下のファイルは、現行 Optica が未対応の構文（制約集合の集約 `max(c in ...)` 等、`def`/`import`、DP系 `bellman`/`stage`/`state`、確率計画系 `prob[]`/シナリオ、CP系 `no_overlap`/`cumulative` など）を使用している、および/またはパラメータデータが未整備のため、**現状では正しい結果を返しません**（各ファイル先頭に `[EXPERIMENTAL]` コメントを付記済み。Fase2で対応予定）。
+[`examples/experimental/`](examples/experimental/) 配下のファイルは、現行 Optica が未対応の構文（制約集合の集約 `max(c in ...)` 等、`def`/`import`、DP系 `bellman`/`stage`/`state`、確率計画系 `prob[]`/シナリオ、CP系 `no_overlap`/`cumulative` など）を使用している、および/またはパラメータデータが未整備のため、**現状では正しい結果を返しません**（各ファイル先頭に `[EXPERIMENTAL]` コメントを付記済み。Fase2で対応予定）。未対応構文を含むため既定ではパースエラーになり、実行するには `--allow-unsupported` が必要です。
 
 > 構文ごとの対応状況（supported / partial / planned / unsupported）と、未対応構文の既定エラー・`--allow-unsupported` の挙動は [docs/SPEC_SUPPORT.md](docs/SPEC_SUPPORT.md) を参照。
 
-`01_lp_production` `02_milp_facility` `03_nlp_portfolio` `04_convex_svm` `05_qp_regression` `06_dp_inventory` `07_stochastic_farmer` `08_combinatorial_tsp` `09_metaheuristic_vrp` `10_cp_scheduling` `11_moo_supply_chain` `12_ml_optimization` `13_largescale_decomposition` `juku_timetabling`
+`01_lp_production` `02_milp_facility` `03_nlp_portfolio` `04_convex_svm` `05_qp_regression` `06_dp_inventory` `07_stochastic_farmer` `08_combinatorial_tsp` `09_metaheuristic_vrp` `10_cp_scheduling` `11_moo_supply_chain` `12_ml_optimization` `13_largescale_decomposition` `advanced_features` `juku_timetabling`（すべて `examples/experimental/`）
 
 ## パフォーマンス
 
