@@ -33,6 +33,56 @@ pub fn solve_cp_entry(
 
 pub use rng::Rng;
 
+/// 解のステータス。目的値の大小ではなく、最適性の保証度と制約充足で決める。
+///
+/// DE/PSO/hybrid のようなメタヒューリスティックは一般に最適性を証明しないため、
+/// たとえ真の最適解に一致していても `Optimal` を主張してはならない（Issue #23）。
+/// `Optimal` は最適性を証明できる backend（例: CP-SAT が `OPTIMAL` を返した場合）のみ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveStatus {
+    /// 最適性が証明された解（証明可能な backend のみ）。
+    ///
+    /// 現状これを出せるのは CP-SAT が `OPTIMAL` を返した場合だけだが、その証明ステータスは
+    /// `cp-sat` feature 配下の backend からまだ配線されていない（デフォルトビルドでは未構築）。
+    /// ステータス語彙の一部として定義しておき、CP-SAT の status を通したら emit する。
+    #[allow(dead_code)]
+    Optimal,
+    /// 実行可能であることが保証された解（証明可能 backend、ただし最適性は未証明）。
+    Feasible,
+    /// ヒューリスティックが見つけた、全制約を満たす解（最適性の主張なし）。
+    HeuristicFeasible,
+    /// 制約違反が残る／実行可能解を見つけられなかった。
+    Infeasible,
+}
+
+impl SolveStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SolveStatus::Optimal => "optimal",
+            SolveStatus::Feasible => "feasible",
+            SolveStatus::HeuristicFeasible => "heuristic_feasible",
+            SolveStatus::Infeasible => "infeasible",
+        }
+    }
+}
+
+/// 最終解 `best` を制約充足の観点で分類する。
+///
+/// `exact_backend` は「最適性を証明できる backend で解けたか」を表す。ヒューリスティック
+/// 経路では常に `false`。制約違反が残れば `Infeasible`、満たしていれば証明可能なら
+/// `Feasible`、ヒューリスティックなら `HeuristicFeasible` を返す。目的値の 0 近傍を
+/// 根拠に `Optimal` とは判定しない。
+pub fn classify_status(model: &Model, best: &[f64], exact_backend: bool) -> SolveStatus {
+    let (feasible, _violation) = model.check_constraints(best);
+    if !feasible {
+        SolveStatus::Infeasible
+    } else if exact_backend {
+        SolveStatus::Feasible
+    } else {
+        SolveStatus::HeuristicFeasible
+    }
+}
+
 const PENALTY_COEFF: f64 = 1e6;
 static PENALTY_ENV: OnceLock<f64> = OnceLock::new();
 

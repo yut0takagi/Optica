@@ -11,6 +11,8 @@ pub struct Args {
     pub threads: usize,
     pub verbose: bool,
     pub quiet: bool,
+    /// 宣言済みだが値の無いパラメータを 0 として扱い、エラーではなく警告にする（Issue #6）。
+    pub allow_missing_params: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ impl Args {
                 threads: num_cpus(),
                 verbose: false,
                 quiet: false,
+                allow_missing_params: false,
             });
         }
 
@@ -62,6 +65,7 @@ impl Args {
         let mut threads = num_cpus();
         let mut verbose = false;
         let mut quiet = false;
+        let mut allow_missing_params = false;
 
         let start_idx = match command {
             Command::Solve { .. } if !args[0].starts_with('-') => 2,
@@ -94,6 +98,7 @@ impl Args {
                 }
                 "-v" | "--verbose" => verbose = true,
                 "-q" | "--quiet" => quiet = true,
+                "--allow-missing-params" => allow_missing_params = true,
                 _ => {}
             }
             i += 1;
@@ -106,6 +111,7 @@ impl Args {
             threads,
             verbose,
             quiet,
+            allow_missing_params,
         })
     }
 }
