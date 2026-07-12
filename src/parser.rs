@@ -866,7 +866,10 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
 
     let expr_part = expr_part.trim();
 
-    // 演算子を探す
+    // 演算子を探す。認識できない演算子（<, >, != など）や、複数演算子の連鎖
+    // （例: `0 <= x <= 5`）は、修正前は制約を黙って読み捨てて「無制約」を
+    // feasible として報告していた（README の「サイレントエラー禁止」保証に
+    // 反する重大なバグ）。明示的なパースエラーにする。
     let (op, op_str) = if expr_part.contains("<=") {
         (ConstraintOp::Le, "<=")
     } else if expr_part.contains(">=") {
@@ -874,12 +877,18 @@ fn parse_constraint(line: &str, model: &mut Model) -> Result<(), String> {
     } else if expr_part.contains("==") {
         (ConstraintOp::Eq, "==")
     } else {
-        return Ok(()); // 制約ではない
+        return Err(format!(
+            "constraint '{}' has no supported operator (use <=, >=, or ==)",
+            line
+        ));
     };
 
     let parts: Vec<&str> = expr_part.split(op_str).collect();
     if parts.len() != 2 {
-        return Ok(());
+        return Err(format!(
+            "constraint '{}' is malformed (chained/duplicate comparison not supported)",
+            line
+        ));
     }
 
     let lhs = parts[0].trim();

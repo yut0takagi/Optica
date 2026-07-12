@@ -465,6 +465,20 @@ pub fn collect_free_syms(e: &Expr, scope: &mut Vec<String>, out: &mut Vec<String
             }
         }
         Expr::Sum(iters, body) => {
+            // 集合名はループ変数のスコープとは独立した「参照」なので、スコープに
+            // 積む前に free symbol として登録する。これにより parser.rs の未知
+            // シンボル検証（`known` に model.sets.keys() を含む）が typo'd な集合名
+            // （例: `sum{i in Itemz}` の `Itemz`）を捕捉できるようになる。
+            // 修正前は集合名がどこにも記録されず、評価時に
+            // `ctx.sets.get(name).unwrap_or_default()` が空集合を返して sum が
+            // 黙って 0 になっていた（README の「サイレントエラー禁止」保証に反する）。
+            // 添字トークン（`x[i]` の `i`）はここでは検証しない（`x[A]` のような
+            // リテラル集合要素と区別できないため。Fase2 の既知の限界）。
+            for (_, set_ref) in iters {
+                if let SetRef::Named(name) = set_ref {
+                    out.push(name.clone());
+                }
+            }
             let n = scope.len();
             for (v, _) in iters {
                 scope.push(v.clone());
@@ -733,6 +747,23 @@ mod tests {
         };
         let e = compile("sum{i in S} p[i] * x[i]").unwrap();
         assert_eq!(eval(&e, &x, &env, &ctx), 40.0); // 10*1 + 40*0 + 30*1
+    }
+
+    #[test]
+    fn collect_free_syms_includes_sum_set_name() {
+        // 回帰テスト（Fix 2）: `sum{i in Itemz}` の集合名 `Itemz` が free symbol として
+        // 収集されること。修正前は集合名がどこにも記録されず、parser.rs の未知シンボル
+        // 検証をすり抜けて typo'd な集合名（例: `Items` の typo `Itemz`）が黙って空集合
+        // として評価され、sum が黙って 0 になっていた。
+        let e = compile("sum{i in Itemz} x[i]").unwrap();
+        let mut scope = Vec::new();
+        let mut free = Vec::new();
+        collect_free_syms(&e, &mut scope, &mut free);
+        assert!(
+            free.contains(&"Itemz".to_string()),
+            "expected sum's set name 'Itemz' to appear in free syms, got {:?}",
+            free
+        );
     }
 
     #[test]
