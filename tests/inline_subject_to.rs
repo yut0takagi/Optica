@@ -52,7 +52,7 @@ fn inline_subject_to_constraint_is_enforced() {
 }
 
 #[test]
-fn inline_subject_to_with_forall_and_sum_is_enforced() {
+fn inline_subject_to_with_sum_is_enforced() {
     // examples/knapsack.optica と同型: `subject to NAME: sum{..} expr <= param;` の
     // インライン形式。capacity=10 を超える 2 アイテム（重み 6+5=11）を両方選ぶと
     // 違反になるはずなので、選択された重みの合計が capacity 以下でなければならない。
