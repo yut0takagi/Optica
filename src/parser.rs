@@ -22,6 +22,9 @@ pub struct Model {
     pub objectives: Vec<Objective>,                    // 多目的
     pub pareto: ParetoMethod,
     pub cp_globals: Vec<String>, // CPグローバル制約（no_overlap, disjunctive, cumulative）
+    /// 未対応（planned）構文を検出した行の説明（Issue #3）。
+    /// 既定ではエラー、`--allow-unsupported` で警告してスキップ継続。
+    pub unsupported: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +79,7 @@ impl Model {
             objectives: Vec::new(),
             pareto: ParetoMethod::Single,
             cp_globals: Vec::new(),
+            unsupported: Vec::new(),
         }
     }
 
@@ -163,6 +167,22 @@ impl Model {
     }
 }
 
+/// 行が「未対応（planned）」構文で始まるなら人間可読な構文名を返す（Issue #3）。
+/// `stage`/`state`/`decision` は set/var 登録される partial なのでここには含めない。
+fn unsupported_construct(line: &str) -> Option<&'static str> {
+    const TABLE: &[(&str, &str)] = &[
+        ("def ", "def (user-defined functions)"),
+        ("bellman ", "bellman (dynamic-programming recursion)"),
+        ("transition:", "transition (DP state transition)"),
+        ("terminal ", "terminal (DP terminal condition)"),
+        ("initial:", "initial (DP initial condition)"),
+    ];
+    TABLE
+        .iter()
+        .find(|(p, _)| line.starts_with(p))
+        .map(|(_, name)| *name)
+}
+
 /// ソースコードをパース
 pub fn parse(source: &str) -> Result<Model, String> {
     let mut model = Model::new();
@@ -178,17 +198,19 @@ pub fn parse(source: &str) -> Result<Model, String> {
     for stmt in &statements {
         let line = stmt.trim();
 
-        // 空行・コメントをスキップ
+        // 未対応（planned）構文は記録してスキップ。方針判断（エラー/警告）は main 側で
+        // `--allow-unsupported` を見て行う（Issue #3, #6 と同じ流儀）。
+        if let Some(name) = unsupported_construct(line) {
+            model.unsupported.push(name.to_string());
+            continue;
+        }
+
+        // 空行・コメント・無害なマーカーをスキップ
         if line.is_empty()
             || line.starts_with('#')
             || line.starts_with("//")
             || line.starts_with("model ")
             || line.starts_with("problem ")
-            || line.starts_with("transition:")
-            || line.starts_with("def ")
-            || line.starts_with("bellman ")
-            || line.starts_with("terminal ")
-            || line.starts_with("initial:")
             || line.starts_with("end")
             || line == "}"
         {
@@ -1065,6 +1087,36 @@ fn parse_bounds(line: &str) -> Result<(f64, f64, bool), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #3: 未対応（planned）構文の検出ヘルパ。
+    #[test]
+    fn unsupported_construct_detects_planned_syntax() {
+        assert_eq!(
+            unsupported_construct("def total_cost(i) -> real:"),
+            Some("def (user-defined functions)")
+        );
+        assert_eq!(
+            unsupported_construct("bellman V[t]:"),
+            Some("bellman (dynamic-programming recursion)")
+        );
+        assert_eq!(
+            unsupported_construct("transition: S[t+1] = S[t]"),
+            Some("transition (DP state transition)")
+        );
+        assert_eq!(
+            unsupported_construct("terminal cost;"),
+            Some("terminal (DP terminal condition)")
+        );
+        assert_eq!(
+            unsupported_construct("initial: S = 0"),
+            Some("initial (DP initial condition)")
+        );
+        // 正当な構文・partial 構文は None
+        assert_eq!(unsupported_construct("var x >= 0;"), None);
+        assert_eq!(unsupported_construct("maximize obj: x;"), None);
+        assert_eq!(unsupported_construct("stage t in 1..12;"), None);
+        assert_eq!(unsupported_construct("state S[t] in 0..100;"), None);
+    }
 
     /// 回帰テスト: 論理行連結が `epsilon:` の閾値行（次のインデント行）を
     /// 吸収して落とさないこと。吸収すると parse() の `epsilon:` スキップに
