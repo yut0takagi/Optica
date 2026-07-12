@@ -5,6 +5,7 @@
 - fix(main,parser,cli): 未設定パラメータ診断（#6）。`param` で宣言されたのにデータを一切与えられていないパラメータを目的関数・制約が参照している場合、暗黙 0 評価による偽の `Objective: 0` を避けるため既定でエラーにする。`--allow-missing-params` で従来どおり 0 として続行（警告付き）。
 - fix(parser): 値なしスカラー宣言 `param name real;` を既知シンボルとして登録（#5）。従来は参照側が `unknown symbol` になっていた（例: `03_nlp_portfolio` の `min_return`）。データ未整備の場合は上記の未設定パラメータ診断が働く。
 - test: `tests/solve_status.rs`（#23）と `tests/param_diagnostics.rs`（#5/#6）を追加。
+- fix(cli): ファイル直指定形式 `optica <file> [OPTIONS]` でも `-q`/`-m`/`-i`/`-t`/`-v` が有効になるよう修正（#4）。従来は `start_idx` がサブコマンド前提で index 1 のオプションを読み飛ばしていた。`tests/cli_options.rs` を追加。
 
 ## Unreleased - Fase1: Trustworthy Core
 - feat(expr): 式評価器を文字列の毎回再解析からAST評価（`src/expr.rs`, Pratt パーサ）へ全面書き換え。`+ - * / ^`、単項マイナス、括弧、関数 `min max abs sqrt exp log pow`、`sum{..}`/`sum(..)`、`if..then..else` に対応。未知の関数名・記号や構文エラーは黙って0を返さず、明示的なパースエラーになる。
