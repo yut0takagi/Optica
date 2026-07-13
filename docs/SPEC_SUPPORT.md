@@ -27,6 +27,7 @@ optica model.optica --allow-unsupported   # warning を出してスキップし�
 | `param name real;`（値なしスカラー） | supported | 既知シンボルとして登録。サイドカー JSON 等で補完（#5） |
 | `param p[S] real;` + データ | supported | 宣言のみで値が無いまま参照すると既定でエラー（#6, `--allow-missing-params` で 0 許可） |
 | `set S = {A, B, ...};` / `set S = 1..N;` | supported | 列挙・範囲 |
+| `set C = A * B [* ...];`（直積） | supported | タプル要素は `"a,b"` 連結。`x[c]` は `x[a,b]` と一致。オペランドは定義済み集合（#11） |
 | `data:` ブロック / サイドカー `model.json` | supported | 外部データは JSON のみ |
 
 ## 目的関数
@@ -54,7 +55,8 @@ optica model.optica --allow-unsupported   # warning を出してスキップし�
 | `+ - * / ^`、括弧、単項マイナス | supported | Pratt パーサで AST 化 |
 | 組み込み関数 `min max abs sqrt exp log pow` | supported | 引数個数（arity）も検証 |
 | `sum{i in S} expr` / `sum(i in S) expr` | supported | 集合上の総和 |
-| `if cond then a else b` | supported | 条件式 |
+| `if cond then a else b` | supported | 条件式（値）。`x <= if a then 1 else 2` のように制約の辺として使える |
+| `if cond then <制約> else <制約>`（条件付き制約） | supported | 枝が制約（`y<=1` 等）の場合。cond は parse 時に評価し枝を選ぶ（param はインライン data）（#8） |
 | ユーザー定義関数呼び出し `f(i)`（非組み込み） | planned/error | `unknown function 'f': ...` と明示エラー。`def` は未対応 |
 | 制約集合の集約 `max(c in ...)` / `min(c in ...)` | planned | Issue #13 |
 | 添字算術 `x[t-1]` / `x[t+1]` | planned | Issue #9 |
