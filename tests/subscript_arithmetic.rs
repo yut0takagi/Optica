@@ -51,7 +51,9 @@ fn forall_with_subscript_offset_solves() {
         stdout, stderr
     );
     assert!(
-        !stderr.contains("unknown") && !stderr.contains("bad index") && !stderr.contains("subscript"),
+        !stderr.contains("unknown")
+            && !stderr.contains("bad index")
+            && !stderr.contains("subscript"),
         "must not raise index/symbol errors. stderr=\n{}",
         stderr
     );

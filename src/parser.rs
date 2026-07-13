@@ -942,25 +942,23 @@ fn parse_objective_named(line: &str) -> Result<(String, crate::expr::Expr), Stri
     }
 }
 
+/// forall の束縛リスト `[("i","S"), ...]` と任意の `where` フィルタ条件（#10）。
+type ForallHeader = (Vec<(String, String)>, Option<String>);
+
 /// `i in S, j in T` 形式の forall ヘッダを `[("i","S"), ("j","T")]` にパースする。
 /// forall ヘッダを束縛リストと任意の `where` フィルタ条件へ分離する（#10）。
 /// 例: `j in JOBS, m in MACHINES where p[j,m] > 0`
 ///   -> ([(j,JOBS),(m,MACHINES)], Some("p[j,m] > 0"))
 /// `where` はバインディングの `,` 分割より前に切り出すため、条件中の `,`（`p[j,m]`）で
 /// 壊れない。
-fn parse_forall_header(
-    header: &str,
-) -> Result<(Vec<(String, String)>, Option<String>), String> {
+fn parse_forall_header(header: &str) -> Result<ForallHeader, String> {
     // " where"（先頭スペースのみ）をトップレベルの区切りとして最初の1つで分離する。
     // 末尾スペースを必須にすると `... where :`（空条件）が検出漏れするため、先頭スペースで探す。
     let (bind_part, where_cond) = match header.find(" where") {
         Some(pos) => {
             let cond = header[pos + 6..].trim();
             if cond.is_empty() {
-                return Err(format!(
-                    "empty 'where' condition in forall: {}",
-                    header
-                ));
+                return Err(format!("empty 'where' condition in forall: {}", header));
             }
             (header[..pos].trim(), Some(cond.to_string()))
         }

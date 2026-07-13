@@ -959,7 +959,10 @@ mod tests {
     fn complex_subscript_expressions_error() {
         assert!(compile("x[t*2]").is_err(), "multiplication in subscript");
         assert!(compile("x[t-s]").is_err(), "identifier offset in subscript");
-        assert!(compile("x[t+1.5]").is_err(), "non-integer offset in subscript");
+        assert!(
+            compile("x[t+1.5]").is_err(),
+            "non-integer offset in subscript"
+        );
     }
 
     #[test]
