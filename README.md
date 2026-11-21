@@ -110,6 +110,8 @@ subject to capacity: sum{i in Items} weight[i] * x[i] <= 10;
 
 以下は既知の最適値に対して golden テスト（`tests/golden.rs` ほか）で検証済みです。
 
+`examples/` 直下に置いた `.optica` は、`tests/examples.rs` がすべて parse から solve まで通ることを `cargo test`（CI）で確かめます。新しい例を足すときは、解けるものを `examples/` 直下に、将来仕様の例を `examples/experimental/` に置いてください。直下に置いた例が解けなくなると CI が落ちます。
+
 | ファイル | 内容 | 既知最適 |
 |----------|------|----------|
 | `examples/knapsack.optica` | 容量制約付きナップサック（LP緩和） | 容量を守った上での最大利益 |
@@ -124,7 +126,7 @@ cargo run --release -- examples/f1_knapsack_binary.optica -m de -i 2000
 
 ### 実験的（experimental）サンプル
 
-[`examples/experimental/`](examples/experimental/) 配下のファイルは、現行 Optica が未対応の構文（制約集合の集約 `max(c in ...)` 等、`def`/`import`、DP系 `bellman`/`stage`/`state`、確率計画系 `prob[]`/シナリオ、CP系 `no_overlap`/`cumulative` など）を使用している、および/またはパラメータデータが未整備のため、**現状では正しい結果を返しません**（各ファイル先頭に `[EXPERIMENTAL]` コメントを付記済み。Fase2で対応予定）。未対応構文を含むため既定ではパースエラーになり、実行するには `--allow-unsupported` が必要です。
+[`examples/experimental/`](examples/experimental/) 配下のファイルは、現行 Optica が未対応の構文（制約集合の集約 `max(c in ...)` 等、`def`/`import`、DP系 `bellman`/`stage`/`state`、確率計画系 `prob[]`/シナリオ、CP系 `no_overlap`/`cumulative` など）を使用している、および/またはパラメータデータが未整備のため、**現状では正しい結果を返しません**（各ファイル先頭に `[EXPERIMENTAL]` コメントを付記済み。Fase2で対応予定）。未対応構文を含むため既定ではパースエラーになり、実行するには `--allow-unsupported` が必要です。このディレクトリは CI の検証対象外です。
 
 > 構文ごとの対応状況（supported / partial / planned / unsupported）と、未対応構文の既定エラー・`--allow-unsupported` の挙動は [docs/SPEC_SUPPORT.md](docs/SPEC_SUPPORT.md) を参照。
 

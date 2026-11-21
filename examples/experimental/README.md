@@ -8,4 +8,6 @@
 optica examples/experimental/06_dp_inventory.optica --allow-unsupported
 ```
 
+このディレクトリの例は CI で検証しません。対応が進んで解けるようになった例は、`examples/` 直下へ移すと `tests/examples.rs` の検証対象になります。
+
 実際に解ける最小サンプルは、ひとつ上の `examples/` 直下（`f1_lp_production.optica` など）を参照してください。構文ごとの対応状況は [../../docs/SPEC_SUPPORT.md](../../docs/SPEC_SUPPORT.md) を参照。
